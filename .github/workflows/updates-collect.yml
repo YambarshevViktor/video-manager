@@ -61,8 +61,8 @@ jobs:
             echo "изменений нет"
             exit 0
           fi
-          git config user.name "updates-bot"
-          git config user.email "updates-bot@users.noreply.github.com"
+          git config user.name "YambarshevViktor"
+          git config user.email "yambarshevviktor@users.noreply.github.com"
           git add data/updates.json
           git commit -m "updates: $(date -u +%F) (workflow ${{ inputs.mode || 'schedule' }})"
           git push
