@@ -1,0 +1,4 @@
+{
+  "appName": { "message": "Video Manager — auto video quality" },
+  "appDescription": { "message": "Automatically picks the best video quality: max, smart mode or manual cap. Works on top of the player." }
+}

@@ -18,7 +18,7 @@ function fmtSpeed(v) {
 }
 function curStep(s) {
   const v = Number(s.speedStep);
-  return v > 0 && isFinite(v) ? Math.min(4, v) : 0.25;
+  return v > 0 && isFinite(v) ? Math.min(4, v) : 0.5;
 }
 function renderSpeed(s) {
   const el = $('spdVal');
@@ -36,10 +36,13 @@ function matchSite(pattern, host) {
   return host === p || host.endsWith('.' + p);
 }
 function allowedOn(host, s) {
+  // Только HDRezka и зеркала из списка; siteMode игнорируем (всегда allowlist).
   if (s.perSite && s.perSite[host] === true) return true;
   if (s.perSite && s.perSite[host] === false) return false;
   const listed = (s.sites || []).some((p) => matchSite(p, host));
-  return s.siteMode === 'allowlist' ? listed : !listed;
+  if (listed) return true;
+  if (!(s.sites || []).length) return matchSite('rezka.ag', host);
+  return false;
 }
 
 function render(s) {
@@ -54,7 +57,7 @@ function render(s) {
     b.textContent = l;
     if (s.cap === v) b.classList.add('on');
     b.addEventListener('click', async () => {
-      await chrome.storage.local.set({ cap: v, mode: s.mode === 'max' ? 'manual' : s.mode });
+      await chrome.storage.local.set({ cap: v });
       Object.assign(s, { cap: v }); render(s);
     });
     $('capRow').appendChild(b);

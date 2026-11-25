@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<div class="card">
+  <div class="head">
+    <div class="logo"></div>
+    <div class="title">Video Manager</div>
+    <label class="switch" title="Вкл/выкл расширение">
+      <input type="checkbox" id="enabled"><span></span>
+    </label>
+  </div>
+
+  <div class="site-row">
+    <div class="site" id="siteHost">…</div>
+    <button class="pill" id="siteToggle">…</button>
+  </div>
+  <div class="hint">Работает только на HDRezka и её зеркалах. После смены списка — перезагрузите вкладку с видео</div>
+
+  <div class="label">Режим</div>
+  <div class="seg" id="modeSeg">
+    <button data-mode="smart">Умный</button>
+    <button data-mode="max">Макс</button>
+    <button data-mode="manual">Ручной</button>
+  </div>
+  <div class="hint" id="modeHint"></div>
+
+  <div class="label">Потолок качества</div>
+  <div class="caps" id="capRow"></div>
+
+  <div class="label">Скорость видео</div>
+  <div class="spd-row">
+    <button id="spdDown" title="Медленнее (S)">−</button>
+    <button id="spdVal" title="Сбросить к 1.0">1.0×</button>
+    <button id="spdUp" title="Быстрее (D)">+</button>
+  </div>
+  <div class="hint">Клавиши на странице с видео: S — медленнее, D — быстрее, R — сброс / возврат, G — избранная</div>
+
+  <div class="status" id="statusBox">Ищу видео на вкладке…</div>
+
+  <details class="tech" id="techDetails">
+    <summary>Инфо</summary>
+    <div id="techBody"></div>
+  </details>
+
+  <div class="row">
+    <button class="btn" id="openOptions">Настройки</button>
+  </div>
+  <div class="hint">Показать / скрыть бейдж на этой вкладке — клавиша V (работает и в русской раскладке)</div>
+</div>
+<script src="popup.js"></script>
+</body>
+</html>

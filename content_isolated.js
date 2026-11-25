@@ -7,7 +7,7 @@
 (() => {
   if (window.__VM_ISO_LOADED__) return;
   window.__VM_ISO_LOADED__ = true;
-  const VM_VERSION = '0.1.38'; // <-- сверяйте с manifest.json; если в диагностике версия меньше — вкладка не перезагружена
+  const VM_VERSION = '0.1.61'; // <-- сверяйте с manifest.json; если в диагностике версия меньше — вкладка не перезагружена
 
   // ---------- «Добавлено»: дата заливки серии/фильма (data/updates.json в репозитории)
   // Сборщик .github/workflows/updates-collect.yml раз в день парсит главную
@@ -23,9 +23,11 @@
   // совпадение, иначе «залито целиком», иначе «неизвестно».
   // Что ещё тянет сборщик и зачем: title/url/type/year — для сверки и отладки
   // (видны в --dump); quality и рейтинг осознанно НЕ тащим — скачут и врут в истории.
-  const DEFAULT_UPDATES_URL = 'https://raw.githubusercontent.com/YambarshevViktor/videom/main/data/updates.json';
-  // ^-- поменяйте на свой репозиторий (или задайте updatesUrl в storage через
-  // консоль options: chrome.storage.local.set({updatesUrl: 'https://.../updates.json'})).
+  const DEFAULT_UPDATES_URL = 'https://raw.githubusercontent.com/YambarshevViktor/video-manager/main/data/updates.json';
+  // ^-- зеркало истории заливок (data/updates.json этого же репозитория; сборщик —
+  // scripts/collect_updates.py + .github/workflows/updates-collect.yml).
+  // Свой источник задаётся через storage в консоли options:
+  // chrome.storage.local.set({updatesUrl: 'https://.../updates.json'}).
   const UPDATES_TTL = 24 * 3600 * 1000;
   const updatesCache = { at: 0, byKey: new Map(), byId: new Map(), loaded: false, error: '', url: '' };
   function normVoiceJs(v) {
@@ -167,9 +169,13 @@
   const DEFAULTS = {
     enabled: true, mode: 'smart', cap: 2160, considerSize: true,
     badgeDefaultVisible: true, hotkey: 'v', closePanelOnShow: true,
-    siteMode: 'blacklist', sites: [], perSite: {}, badgeHiddenTabs: {},
-    speed: 1, speedStep: 0.25, preferredSpeed: 1.8, speedHotkeys: true, lastSpeedBeforeReset: 0,
+    siteMode: 'allowlist', sites: ['rezka.ag'], perSite: {}, badgeHiddenTabs: {},
+    speed: 1, speedStep: 0.5, preferredSpeed: 2, speedHotkeys: true, lastSpeedBeforeReset: 0,
     updatesUrl: '', // свой URL updates.json (по умолчанию DEFAULT_UPDATES_URL)
+    subSize: 35, // свои субтитры: размер текста, % от базового
+    subBgOpacity: 0.7, // свои субтитры: прозрачность чёрного фона 0–1
+    subBottomMargin: 32, // свои субтитры: отступ снизу, px
+    subShift: 0, // свои субтитры: сдвиг по времени, с (+ — задерживает)
   };
   let S = { ...DEFAULTS };
   let mainState = { players: [], videos: [], events: [] };
@@ -205,7 +211,19 @@
       if (got.badgeHidden !== undefined) {
         try { await chrome.storage.local.remove('badgeHidden'); } catch (e) {}
       }
+      // свои субтитры: чиним мусор из storage (границы ползунков в настройках)
+      S.subSize = clampNum(S.subSize, 0, 250, 35);
+      S.subBgOpacity = clampNum(S.subBgOpacity, 0, 1, 0.7);
+      S.subBottomMargin = clampNum(S.subBottomMargin, 0, 200, 32);
+      S.subShift = clampNum(S.subShift, -10, 10, 0);
     } catch (e) { S = { ...DEFAULTS }; }
+  }
+  function clampNum(v, min, max, fb) {
+    let n = (typeof v === 'string') ? parseFloat(String(v).replace(',', '.')) : Number(v);
+    if (!isFinite(n)) return fb;
+    if (n < min) return min;
+    if (n > max) return max;
+    return Math.round(n * 100) / 100;
   }
   function pushSettingsToMain() {
     try {
@@ -240,6 +258,10 @@
         // скорость могли поменять из попапа/настроек/другого фрейма —
         // доводим до видео принудительно (включая сброс в 1.0)
         if (chg.speed) { try { applySpeedAll(true); } catch (e) {} }
+        // настройки своих субтитров — перекрашиваем оверлеи на месте
+        if (chg.subSize || chg.subBgOpacity || chg.subBottomMargin || chg.subShift) {
+          try { refreshSubOverlays(); } catch (e) {}
+        }
         refreshAllBadges();
       }
     });
@@ -261,10 +283,14 @@
     return host === p || host.endsWith('.' + p);
   }
   function siteAllowed(host) {
+    // Только HDRezka и зеркала: sites = список зеркал, siteMode игнорируем (всегда allowlist).
     if (S.perSite && S.perSite[host] === true) return true;
     if (S.perSite && S.perSite[host] === false) return false;
     const listed = (S.sites || []).some((p) => patternMatch(p, host));
-    return S.siteMode === 'allowlist' ? listed : !listed;
+    if (listed) return true;
+    // страховка при пустом списке: главная rezka.ag работает всегда
+    if (!(S.sites || []).length) return patternMatch('rezka.ag', host);
+    return false;
   }
   function isActive() {
     if (!S.enabled) return false;
@@ -695,7 +721,7 @@
     logDom('DOM: пробую кнопку настроек (' + ctl.gearTried.size + '/' + list.length + ') -> ' + describeEl(next));
     return true;
   }
-  function pjsTick(video, ctl) {
+  function pjsTick(video, ctl, force) {
     const now = Date.now();
     const root = containerOf(video);
     let rows = pjsRows(root);
@@ -717,9 +743,11 @@
         logDom('DOM pjs OK: применилось ' + active.q.label);
         ctl.pendingRank = null;
         ctl.curRank = active.q.rank;
+        ctl.settled = true; // дошли до цели — дальше спим, не дёргаем
       } else if (now - ctl.pendingSince > 9000) {
         logDom('DOM pjs НЕ применилось за 9с — попробуем ещё раз');
         ctl.pendingRank = null;
+        ctl.settled = false;
       } else {
         ctl.curRank = active ? active.q.rank : ctl.curRank;
         return true; // ждём перезагрузку потока
@@ -732,7 +760,10 @@
     for (const u of uniq) { if (u.q.rank <= tr + 1e-9) want = u; }
     if (!want) want = uniq[0];
     const activeRank = active ? active.q.rank : -1;
-    if (Math.abs(activeRank - want.q.rank) < 1e-9) return true; // уже то
+    if (Math.abs(activeRank - want.q.rank) < 1e-9) { ctl.settled = true; ctl.blindClicks = 0; return true; } // уже то — спим
+    // Активное не прочиталось — вслепую не кликаем (перезагрузка потока зря):
+    // один заходный клик на видео, дальше ждём читаемого состояния или force.
+    if (!active && (ctl.blindClicks || 0) >= 1 && !force) return true;
     if (now - ctl.lastClick < 6000) return true;
     if (ctl.clicks >= 4 && !ctl.stallArmed) return true;
     try {
@@ -740,6 +771,8 @@
       ctl.lastClick = now; ctl.clicks++;
       ctl.pendingRank = want.q.rank; ctl.pendingSince = now;
       ctl.curRank = want.q.rank;
+      ctl.settled = false; // кликнули — ждём применения, потом снова проверим
+      if (!active) ctl.blindClicks = (ctl.blindClicks || 0) + 1;
       logDom('DOM pjs click -> ' + want.q.label + ' @ ' + describeEl(want.el));
     } catch (e) {}
     return true;
@@ -756,22 +789,29 @@
 
   function domTick(video, force) {
     if (!isActive()) return;
+    if (speedPassive()) return; // >2×: не трогаем плеер, только скорость (как VSC)
     if (video.dataset && video.dataset.vmVid) {
       // этим видео управляет API-плеер — DOM не трогаем
       const bound = (mainState.players || []).some((p) => p.id === video.dataset.vmVid);
       if (bound) return;
     }
     let ctl = domCtl.get(video);
-    if (!ctl) { ctl = { clicks: 0, lastClick: 0, curRank: -1, lastScan: 0 }; domCtl.set(video, ctl); }
+    if (!ctl) { ctl = { clicks: 0, lastClick: 0, curRank: -1, lastScan: 0, settled: false, lastFull: 0 }; domCtl.set(video, ctl); }
+    const now = Date.now();
+    // Дисциплина «только при необходимости» (по режимам необходимость разная,
+    // но правило одно): довёл качество до цели — спим. Полная проверка с правом
+    // клика — не чаще раза в 30с; пока ждём применения своего клика (pendingRank)
+    // или идёт явный запрос (force) — проверяем как обычно.
+    if (!force && ctl.settled && ctl.pendingRank == null && now - (ctl.lastFull || 0) < 30000) return;
+    ctl.lastFull = now;
     // CDN-плеер rezka: сначала точечный pjs-адаптер (работает и со скрытым меню)
     try {
-      if (pjsTick(video, ctl)) {
+      if (pjsTick(video, ctl, force)) {
         const rec = badges.get(video);
         if (rec) updateBadge(rec);
         return;
       }
     } catch (e) {}
-    const now = Date.now();
     let uniq = ctl.uniq || null;
     if (!uniq || force || now - ctl.lastScan >= 3000) {
       ctl.lastScan = now;
@@ -781,7 +821,8 @@
       if (!items.length && root !== document) items = findQualityItems(document);
       let grouped = groupByMenu(items);
       if (!grouped.length) {
-        // меню закрыто — пробуем открыть кнопку качества (не чаще раза в 10 c)
+        // меню закрыто — пробуем открыть кнопку качества (не чаще раза в 30 c:
+        // открывалка тоже дёргает плеер, без нужды не жмём)
         const op = findQualityOpener();
         if (op) {
           const tok = extractQToken((op.innerText || op.textContent || '').trim());
@@ -790,7 +831,7 @@
             ctl.items = [{ label: oq.label, rank: oq.rank }];
             ctl.curRank = oq.rank;
           }
-          if (now - (ctl.lastOpener || 0) > 10000) {
+          if (now - (ctl.lastOpener || 0) > 30000) {
             ctl.lastOpener = now;
             try { mouseClick(op); logDom('DOM: клик-открывалка -> ' + describeEl(op)); } catch (e) {}
           }
@@ -821,7 +862,11 @@
     if (!want) want = uniq[0];
     const activeRank = active ? active.q.rank : -1;
     ctl.curRank = activeRank;
-    if (Math.abs(activeRank - want.q.rank) < 1e-9) return; // уже то
+    if (Math.abs(activeRank - want.q.rank) < 1e-9) { ctl.settled = true; ctl.blindClicks = 0; return; } // уже то — спим
+    // Активное качество не прочиталось — вслепую не кликаем: каждый такой клик
+    // перезагружает поток зря. Даём один заходный клик на видео (вдруг меню врёт),
+    // дальше ждём читаемого состояния или явного force (кнопка «Обновить», vm-force).
+    if (!active && (ctl.blindClicks || 0) >= 1 && !force) return;
     // защита от циклов: не чаще 1 клика в 6 c, не больше 4 авто-кликов, кроме отката при stall
     if (now - ctl.lastClick < 6000) return;
     if (ctl.clicks >= 4 && !ctl.stallArmed) return;
@@ -829,8 +874,80 @@
       mouseClick(want.el);
       ctl.lastClick = now; ctl.clicks++;
       ctl.curRank = want.q.rank;
+      ctl.settled = false; // кликнули — ждём применения, потом снова проверим
+      if (!active) ctl.blindClicks = (ctl.blindClicks || 0) + 1;
       logDom('DOM click -> ' + want.q.label + ' (mode=' + S.mode + ')');
     } catch (e) {}
+  }
+
+  // Только чтение уровней без кликов/открывалок/шестерёнки.
+  // Нужно для пассивного режима (>2×): автоматика заморожена, но бейдж
+  // не должен вечно висеть в «Поиск…», а ручные клики (vm-force) нуждаются
+  // в известных уровнях. Скан дешёвый (DOM-запросы), поток не дёргает.
+  function domScanOnly(video) {
+    try {
+      let ctl = domCtl.get(video);
+      if (!ctl) { ctl = { clicks: 0, lastClick: 0, curRank: -1, lastScan: 0, settled: false, lastFull: 0 }; domCtl.set(video, ctl); }
+      // pjs: пункты лежат в DOM всегда, видимость не требуем (как pjsTick)
+      try {
+        const root = containerOf(video);
+        let rows = pjsRows(root);
+        if (!rows.length && root !== document) rows = pjsRows(document);
+        if (rows.length >= 2) {
+          const seen = new Map();
+          for (const r of rows) { if (!seen.has(r.q.rank)) seen.set(r.q.rank, r); }
+          const uniq = [...seen.values()].sort((a, b) => a.q.rank - b.q.rank);
+          ctl.uniq = uniq;
+          ctl.items = uniq.map((u) => ({ label: u.q.label, rank: u.q.rank }));
+          ctl.pjs = true;
+          const active = uniq.find((u) => isActiveItem({ el: u.el }));
+          if (active) ctl.curRank = active.q.rank;
+          const rec0 = badges.get(video);
+          if (rec0) updateBadge(rec0);
+          return true;
+        }
+      } catch (e) {}
+      // generic: только уже видимое меню, ничего не открываем
+      try {
+        const root = containerOf(video);
+        let items = findQualityItems(root);
+        if (!items.length && root !== document) items = findQualityItems(document);
+        const grouped = groupByMenu(items);
+        if (grouped.length) {
+          const seen = new Map();
+          for (const it of grouped) {
+            const key = it.q.rank + '|' + it.q.label.toLowerCase();
+            if (!seen.has(key)) seen.set(key, it);
+          }
+          const uniq = [...seen.values()].sort((a, b) => a.q.rank - b.q.rank);
+          ctl.uniq = uniq;
+          ctl.items = uniq.map((u) => ({ label: u.q.label, rank: u.q.rank }));
+          const active = uniq.find((u) => isActiveItem(u));
+          if (active) ctl.curRank = active.q.rank;
+          const rec1 = badges.get(video);
+          if (rec1) updateBadge(rec1);
+          return true;
+        }
+        // на кнопке написан текущий уровень — хотя бы его показываем в бейдже
+        try {
+          const op = findQualityOpener();
+          if (op) {
+            const tok = extractQToken(((op.innerText || op.textContent || '').trim()));
+            const oq = tok ? parseQLabel(tok) : null;
+            if (oq) {
+              ctl.items = [{ label: oq.label, rank: oq.rank }];
+              ctl.curRank = oq.rank;
+              const rec2 = badges.get(video);
+              if (rec2) updateBadge(rec2);
+              return true;
+            }
+          }
+        } catch (e) {}
+      } catch (e) {}
+      const rec = badges.get(video);
+      if (rec) updateBadge(rec);
+    } catch (e) {}
+    return false;
   }
 
   // stall-детект для DOM-плееров: два подряд waiting>2.5с — шаг вниз
@@ -848,6 +965,7 @@
     setInterval(() => {
       try {
         if (!st.waitingSince) return;
+        if (speedPassive()) { st.waitingSince = 0; st.bad = 0; return; } // >2×: степ-даунов нет
         if (Date.now() - st.waitingSince < 2500) return;
         st.waitingSince = Date.now();
         st.bad++;
@@ -868,7 +986,7 @@
         const cand = items.find((u) => Math.abs(u.q.rank - target.rank) < 1e-9) ||
           (root !== document ? findQualityItems(document).find((u) => Math.abs(u.q.rank - target.rank) < 1e-9) : null);
         if (cand) {
-          try { mouseClick(cand.el); ctl.lastClick = Date.now(); ctl.curRank = target.rank; logDom('DOM step down -> ' + target.label + ' @ ' + describeEl(cand.el)); } catch (e) {}
+          try { mouseClick(cand.el); ctl.lastClick = Date.now(); ctl.curRank = target.rank; ctl.settled = false; logDom('DOM step down -> ' + target.label + ' @ ' + describeEl(cand.el)); } catch (e) {}
         }
       } catch (e) {}
     }, 1500);
@@ -904,9 +1022,19 @@
     const v = Number(S.speed);
     return isFinite(v) ? clampSpeed(v) : 1;
   }
+  // Пассивный режим скорости (>2×): как VSC — только ставим playbackRate
+  // и НЕ трогаем плеер. Любой наш клик по меню качества = перезагрузка
+  // потока сайтом, а на высокой скорости это срывает буфер (кадры, пропавший
+  // звук). Качество остаётся как есть (какое выбрал пользователь/сайт),
+  // вся автоматика (сканы, клики, степ-дауны, пробы веса) замирает
+  // до возврата скорости к ≤2. Явные клики пользователя по уровням в
+  // мини-панели (vm-force) при этом работают всегда.
+  function speedPassive() {
+    try { return desiredSpeed() > 2; } catch (e) { return false; }
+  }
   function speedStep() {
     const v = Number(S.speedStep);
-    return v > 0 && isFinite(v) ? Math.min(4, v) : 0.25;
+    return v > 0 && isFinite(v) ? Math.min(4, v) : 0.5;
   }
   // force=true — явный выбор пользователя (кнопка/хоткей/попап): доводим до видео
   // всегда, включая сброс в 1.0. Без force нетронутое видео при want==1 не трогаем.
@@ -1017,12 +1145,19 @@
       .lvls{display:flex;flex-wrap:wrap;gap:6px;max-height:96px;overflow:auto;margin-bottom:8px}
       .frow{display:flex;gap:6px;margin-top:10px}
       .frow+.frow{margin-top:6px}
-      .srow{display:flex;gap:6px;margin-bottom:8px;align-items:stretch}
-      .sbtn{flex:1;padding:7px 0;font-size:12.5px;font-weight:700;text-align:center;border-radius:10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);color:#fff;cursor:pointer}
-      .sbtn:hover{background:rgba(255,255,255,.14)}
-      .sval{flex:1.4;padding:7px 0;font-size:12.5px;font-weight:700;text-align:center;border-radius:10px;background:linear-gradient(135deg,#5b8cff,#8b5cf6);border:1px solid transparent;color:#fff;cursor:pointer}
       .fbtn{flex:1;padding:7px 0;font-size:11px;text-align:center;border-radius:10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);color:#fff;cursor:pointer}
       .fbtn:hover{background:rgba(255,255,255,.14)}
+      .frow3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:10px}
+      .fwide{margin-top:6px;width:100%}
+      .subs{display:flex;flex-direction:column;gap:6px;margin-top:6px;max-height:132px;overflow:auto}
+      .subbtn{padding:6px 9px;font-size:11px;text-align:left;border-radius:9px;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.06);color:#fff;cursor:pointer}
+      .subbtn:hover{background:rgba(255,255,255,.14)}
+      .subnote{font-size:10.5px;opacity:.65;line-height:1.4}
+      .subhead{font-size:10px;opacity:.55;margin-top:4px;text-transform:uppercase;letter-spacing:.05em}
+      .subbtn.pending{opacity:.8;border-style:dashed}
+      .substatus{margin-top:6px}
+      .subrow{display:flex;gap:6px;margin-top:6px}
+      .subrow .subbtn{flex:1}
       .hide{opacity:0;pointer-events:none}
     `;
     sh.appendChild(css);
@@ -1115,6 +1250,16 @@
     try {
       const p = badgePosCache && badgePosCache[location.host];
       if (p && typeof p.left === 'string' && typeof p.top === 'string') {
+        // Самопочинка: позиция могла сохраниться за экраном (случайный драг,
+        // смена размера окна) — такой бейдж выглядел бы «пропавшим навсегда».
+        // Проверяем px-координаты против вьюпорта, мусор игнорируем.
+        const m = 80; // допуск на пол-бейджа за краем
+        const lx = parseFloat(p.left), tx = parseFloat(p.top);
+        const vw = (window.innerWidth || 0), vh = (window.innerHeight || 0);
+        if (isFinite(lx) && isFinite(tx) && vw > 0 && vh > 0) {
+          const isPx = /px\s*$/.test(p.left) && /px\s*$/.test(p.top);
+          if (isPx && (lx < -m || lx > vw + m || tx < -m || tx > vh + m)) return false;
+        }
         host.style.left = p.left;
         host.style.top = p.top;
         host.style.transform = 'none';
@@ -2044,17 +2189,6 @@
     const spdTxt = (Math.round(spd * 100) / 100) + '×';
     const caps = [[360, '360p'], [480, '480p'], [720, '720p'], [1080, '1080p'], [1081, '1080U'], [1440, '2K'], [2160, '4K']];
     const SPD_PRESETS = [0.5, 1, 1.5, 2, 3];
-    let lvls = '';
-    if (info.player && info.player.levels) {
-      lvls = info.player.levels.map((l, i) =>
-        `<button class="c${i === info.player.current ? ' on' : ''}" data-lvl="${i}">${escapeHtml(l.label)}</button>`).join('');
-    } else {
-      const ctl = domCtl.get(rec.video);
-      if (ctl && ctl.items) {
-        lvls = ctl.items.map((x) =>
-          `<button class="c${Math.abs(x.rank - ctl.curRank) < 1e-9 ? ' on' : ''}" data-rank="${x.rank}">${escapeHtml(x.label)}</button>`).join('');
-      }
-    }
     p.innerHTML = `
       <div class="pt">Video Manager · ${escapeHtml(info.text)}</div>
       <div class="row">
@@ -2064,50 +2198,31 @@
       </div>
       <div class="pt">Потолок</div>
       <div class="caps">${caps.map(([v, l]) => `<button class="c${S.cap === v ? ' on' : ''}" data-cap="${v}">${l}</button>`).join('')}</div>
-      <div class="pt">Уровни на сайте</div>
-      <div class="lvls">${lvls || '<span style="opacity:.6;font-size:11px">пока не найдены</span>'}</div>
       <div class="pt">Скорость · ${escapeHtml(spdTxt)}</div>
-      <div class="srow">
-        <button class="sbtn" data-spd="down" title="Медленнее (S)">−${step}</button>
-        <button class="sval" data-spd="reset" title="Сброс 1.0 / возврат (R)">${escapeHtml(spdTxt)}</button>
-        <button class="sbtn" data-spd="up" title="Быстрее (D)">+${step}</button>
-      </div>
       <div class="caps">${SPD_PRESETS.map((v) => `<button class="c${Math.abs(spd - v) < 1e-9 ? ' on' : ''}" data-spd="preset:${v}">${v}×</button>`).join('')}</div>
-      <div class="frow">
-        <button class="fbtn" data-act="info">Инфо на видео</button>
-      </div>
-      <div class="frow">
+      <div class="frow3">
+        <button class="fbtn" data-act="info">Инфо</button>
         <button class="fbtn" data-act="settings">Настройки</button>
-      </div>
-      <div class="frow">
         <button class="fbtn" data-act="pos">Сбросить позицию</button>
-      </div>`;
+      </div>
+      <button class="fbtn fwide" data-act="subs">Скачать субтитры</button>
+      <button class="fbtn fwide" data-act="customsubs">Свои субтитры (.srt)</button>
+      <input type="file" accept=".srt" style="display:none">
+      <div class="customsub" style="display:none"></div>
+      <div class="subs" style="display:none"></div>
+      <div class="substatus subnote" style="display:none"></div>`;
     p.querySelectorAll('[data-mode]').forEach((btn) => btn.addEventListener('click', async (e) => {
       e.stopPropagation();
       await chrome.storage.local.set({ mode: btn.dataset.mode });
     }));
     p.querySelectorAll('[data-cap]').forEach((btn) => btn.addEventListener('click', async (e) => {
       e.stopPropagation();
-      await chrome.storage.local.set({ cap: parseInt(btn.dataset.cap, 10), mode: S.mode === 'max' ? 'manual' : S.mode });
+      await chrome.storage.local.set({ cap: parseInt(btn.dataset.cap, 10) });
     }));
     p.querySelectorAll('[data-spd]').forEach((btn) => btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const a = btn.dataset.spd;
-      if (a === 'up') setSpeed(desiredSpeed() + speedStep());
-      else if (a === 'down') setSpeed(desiredSpeed() - speedStep());
-      else if (a === 'reset') toggleResetSpeed();
-      else if (a && a.startsWith('preset:')) setSpeed(parseFloat(a.slice(7)));
-    }));
-    p.querySelectorAll('[data-lvl]').forEach((btn) => btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const pl = info.player;
-      if (pl) {
-        try { window.postMessage({ source: 'vm-cmd', type: 'vm-force', playerId: pl.id, index: parseInt(btn.dataset.lvl, 10) }, '*'); } catch (x) {}
-      }
-    }));
-    p.querySelectorAll('[data-rank]').forEach((btn) => btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      forceDomRank(rec.video, parseFloat(btn.dataset.rank));
+      if (a && a.startsWith('preset:')) setSpeed(parseFloat(a.slice(7)));
     }));
     const posBtn = p.querySelector('[data-act="pos"]');
     if (posBtn) posBtn.addEventListener('click', (e) => { e.stopPropagation(); resetBadgePos(rec.host); });
@@ -2119,6 +2234,33 @@
     });
     const infoBtn = p.querySelector('[data-act="info"]');
     if (infoBtn) infoBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleVideoInfo(rec.video); });
+    const subsBtn = p.querySelector('[data-act="subs"]');
+    if (subsBtn) subsBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      rec._subsOpen = !rec._subsOpen;
+      const box = p.querySelector('.subs');
+      const stEl = p.querySelector('.substatus');
+      if (box) box.style.display = rec._subsOpen ? 'flex' : 'none';
+      if (stEl) stEl.style.display = 'none';
+      if (rec._subsOpen) { try { rec._subsCache = null; } catch (e) {} renderSubsList(rec, true); }
+    });
+    if (rec._subsOpen) {
+      const box = p.querySelector('.subs');
+      if (box) { box.style.display = 'flex'; renderSubsList(rec); }
+    }
+    try { paintCustomSub(rec); } catch (e) {}
+    const csBtn = p.querySelector('[data-act="customsubs"]');
+    const csFile = p.querySelector('input[type="file"]');
+    if (csBtn && csFile) csBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      try { csFile.click(); } catch (x) {}
+    });
+    if (csFile) csFile.addEventListener('change', (e) => {
+      e.stopPropagation();
+      const f = csFile.files && csFile.files[0];
+      if (f) loadCustomSrt(rec, f);
+      try { csFile.value = ''; } catch (x) {}
+    });
   }
 
   function forceDomRank(video, rank) {
@@ -2134,6 +2276,1088 @@
           logDom('DOM force click -> ' + describeEl(cand.el));
         } catch (e) {}
       }
+    } catch (e) {}
+  }
+
+  // ---------- субтитры: сбор источников + скачивание
+  // Главный источник — сеть: background ловит webRequest'ом точные URL .vtt/.srt,
+  // которые плеер уже успешно подгрузил, качаем их через chrome.downloads
+  // (CORS не мешает, куки подставляются сами). Полный список дорожек читаем
+  // из меню «Субтитры» плеера ([fid]-строка + пункты [f2id]): плеер регистрирует
+  // в video/textTracks обычно только включённую дорожку. Имена файлов при
+  // скачивании — человеческие («Русские-ru.vtt»), хеш CDN — запасной вариант.
+  // Встроенные дорожки без файла (HLS/вшитые) сохраняем генерацией SRT из cues.
+  function fmtSubTime(sec, forSrt) {
+    try {
+      sec = Math.max(0, Number(sec) || 0);
+      const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+      const s = Math.floor(sec % 60), ms = Math.floor((sec % 1) * 1000);
+      const p = (n, l) => String(n).padStart(l, '0');
+      return p(h, 2) + ':' + p(m, 2) + ':' + p(s, 2) + (forSrt ? ',' : '.') + p(ms, 3);
+    } catch (e) { return forSrt ? '00:00:00,000' : '00:00:00.000'; }
+  }
+  function cuesToSrt(track) {
+    try {
+      const cues = (track && track.cues) ? Array.from(track.cues) : [];
+      if (!cues.length) return '';
+      let n = 0, out = '';
+      for (const c of cues) {
+        let txt = '';
+        try { txt = c.text || ''; } catch (e) {}
+        if (!txt) {
+          try {
+            const d = document.createElement('div');
+            d.appendChild(c.getCueAsHTML());
+            txt = d.textContent || d.innerText || '';
+          } catch (e) {}
+        }
+        txt = String(txt).replace(/\r\n?/g, '\n').trim();
+        if (!txt) continue;
+        n++;
+        out += n + '\n' + fmtSubTime(c.startTime, true) + ' --> ' + fmtSubTime(c.endTime, true) + '\n' + txt + '\n\n';
+      }
+      return out;
+    } catch (e) { return ''; }
+  }
+  function subFileName(label, ext, i) {
+    try {
+      let base = String(label || ('subs' + ((i || 0) + 1))).trim()
+        .replace(/\s+/g, '-').replace(/[\\/:*?"<>|]/g, '').replace(/[^a-zA-Z0-9а-яА-ЯёЁ_\-.]+/g, '').slice(0, 60);
+      if (!base) base = 'subs' + ((i || 0) + 1);
+      return base + '.' + (ext || 'srt');
+    } catch (e) { return 'subs.srt'; }
+  }
+  function normSubLabel(s) {
+    try { return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
+    catch (e) { return ''; }
+  }
+  // Человеческое название дорожки («Русские»): имена файлов и заглушки отсеиваем
+  function humanSubLabel(item) {
+    try {
+      const cands = [item && item.label, item && item.lang];
+      for (const c of cands) {
+        const s = String(c || '').trim();
+        if (!s) continue;
+        if (/\.(vtt|srt|ttml|ass|ssa|smi|sbv)$/i.test(s)) continue; // dvrqv4s09o.vtt — имя файла, не название
+        if (/^(файл|субтитры|subtitle?s|subs?|track|дорожка)\s*\d*$/i.test(s)) continue; // заглушки
+        if (/^[a-z0-9]{8,}(\.\w+)?$/i.test(s)) continue; // хеш CDN
+        return s;
+      }
+    } catch (e) {}
+    return '';
+  }
+  // Имя файла для сохранения: «Русские-ru.vtt» вместо хеша CDN
+  function niceSubName(item, ext) {
+    try {
+      const h = humanSubLabel(item);
+      if (!h) return '';
+      let base = h;
+      const lang = String((item && item.lang) || '').trim();
+      if (lang && normSubLabel(lang) !== normSubLabel(h) && !/\.(vtt|srt|ttml|ass|ssa|smi|sbv)$/i.test(lang)) base += ' (' + lang + ')';
+      return subFileName(base, ext, (item && item._idx) || 0);
+    } catch (e) { return ''; }
+  }
+  function saveBlobAs(blob, name) {
+    try {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = name;
+      try { a.style.display = 'none'; document.documentElement.appendChild(a); } catch (e) {}
+      try { a.click(); } catch (e) { try { mouseClick(a); } catch (x) {} }
+      setTimeout(() => { try { URL.revokeObjectURL(url); } catch (e) {} try { a.remove(); } catch (e) {} }, 4000);
+    } catch (e) {}
+  }
+  // ---------- свои субтитры: .srt с компьютера поверх видео (пока только .srt, rezka/зеркала)
+  // Файл никуда не уходит: читаем локально, конвертим srt→vtt, вешаем свой <track>
+  // на тот же <video> и включаем textTrack в showing. Живёт до перезагрузки страницы.
+  function sayCustom(rec, msg) {
+    try {
+      const st = rec.panel && rec.panel.querySelector('.substatus');
+      if (!st) return;
+      st.textContent = msg;
+      st.style.display = 'block';
+    } catch (e) {}
+  }
+  function decodeSrtBuffer(buf) {
+    try {
+      const u8 = new Uint8Array(buf);
+      let s = '';
+      try { s = new TextDecoder('utf-8', { fatal: true }).decode(u8); return s; }
+      catch (e) { /* не utf-8 — пробуем windows-1251 (частый кейс русских .srt) */ }
+      try { s = new TextDecoder('windows-1251').decode(u8); return s; }
+      catch (e) {}
+      try { s = new TextDecoder('utf-8').decode(u8); return s; } catch (e) {}
+      return '';
+    } catch (e) { return ''; }
+  }
+  function srtToVtt(text) {
+    try {
+      let t = String(text || '').replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+      if (!/-->/.test(t)) return '';
+      // запятые в таймкодах → точки; чиним «00:00:00,000 --> 00:00:02,000»
+      t = t.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+      t = t.replace(/\n{3,}/g, '\n\n').trim();
+      if (!t) return '';
+      return 'WEBVTT\n\n' + t + '\n';
+    } catch (e) { return ''; }
+  }
+  // ---------- свои субтитры: свой оверлей поверх видео (не <track>) ----------
+  // Нативный ::cue не умеет отступ снизу и сдвиг по времени, поэтому рисуем сами:
+  // парсим .srt в cues [{start,end,text}], тикаем по video.currentTime + сдвиг,
+  // показываем в div поверх видео (белый текст на чёрном, настройки из storage).
+  function srtTimeToSec(s) {
+    try {
+      const m = String(s || '').trim().match(/(?:(\d+):)?(\d{1,2}):(\d{1,2})[,.](\d{1,3})/);
+      if (!m) return null;
+      const h = parseInt(m[1] || '0', 10), mi = parseInt(m[2], 10), se = parseInt(m[3], 10);
+      const ms = parseInt((m[4] + '000').slice(0, 3), 10);
+      return h * 3600 + mi * 60 + se + ms / 1000;
+    } catch (e) { return null; }
+  }
+  function parseSrtCues(raw) {
+    try {
+      const text = String(raw || '').replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+      if (!/-->/.test(text)) return [];
+      const blocks = text.split(/\n\s*\n/);
+      const out = [];
+      for (const b of blocks) {
+        const lines = b.split('\n').map((x) => x.trim()).filter((x) => x);
+        if (!lines.length) continue;
+        let ti = lines.findIndex((x) => /-->/.test(x));
+        if (ti < 0) continue;
+        const parts = lines[ti].split('-->');
+        const st = srtTimeToSec(parts[0]), en = srtTimeToSec(parts[1]);
+        if (st === null || en === null || en <= st) continue;
+        const txt = lines.slice(ti + 1).join('\n').replace(/<[^>]*>/g, '').trim();
+        if (!txt) continue;
+        out.push({ start: st, end: en, text: txt });
+      }
+      out.sort((a, b) => a.start - b.start);
+      return out;
+    } catch (e) { return []; }
+  }
+  function subTextToHtml(s) {
+    return escapeHtml(s).replace(/\n/g, '<br>');
+  }
+  function subWrapOf(rec) {
+    try {
+      const v = rec.video;
+      if (!v || !v.isConnected) return null;
+      // тот же контейнер, что у бейджа: обычно он и уходит в fullscreen
+      let wrap = null;
+      try { wrap = v.closest('[class*="player" i],[id*="player" i]') || v.parentElement; } catch (e) {}
+      if (!wrap || wrap === document.body || wrap === document.documentElement) wrap = v.parentElement || document.body;
+      return wrap;
+    } catch (e) { return null; }
+  }
+  function ensureSubOverlay(rec) {
+    try {
+      let ov = rec._subOverlay;
+      if (ov && ov.isConnected) return ov;
+      const wrap = subWrapOf(rec);
+      if (!wrap) return null;
+      try {
+        if (getComputedStyle(wrap).position === 'static') wrap.style.position = 'relative';
+      } catch (e) {}
+      ov = document.createElement('div');
+      ov.setAttribute('data-vm-subs', 'custom');
+      ov.style.cssText = 'position:absolute;left:0;right:0;text-align:center;pointer-events:none;z-index:2147483646;display:none;';
+      const inner = document.createElement('span');
+      ov.appendChild(inner);
+      wrap.appendChild(ov);
+      rec._subOverlay = ov;
+      rec._subOverlayInner = inner;
+      rec._subStyleKey = null;
+      applySubOverlayStyle(rec);
+      return ov;
+    } catch (e) { return null; }
+  }
+  function applySubOverlayStyle(rec) {
+    try {
+      const ov = rec._subOverlay, inner = rec._subOverlayInner;
+      if (!ov || !inner || !ov.isConnected) return;
+      const size = clampNum(S.subSize, 0, 250, 35);
+      const op = clampNum(S.subBgOpacity, 0, 1, 0.7);
+      const bottom = clampNum(S.subBottomMargin, 0, 200, 32);
+      let base = 20;
+      try {
+        const h = (rec.video && rec.video.clientHeight) || 0;
+        if (h > 0) base = Math.max(14, h * 0.055);
+      } catch (e) {}
+      // пол: пропорционально плееру, но не мельче 12px — иначе в маленьком окне
+      // мелкий процент (35%) даёт нечитаемые ~8px; фулскрин это не затрагивает
+      let fs = Math.round(base * size / 100);
+      if (size > 0) fs = Math.max(12, fs);
+      const cacheKey = size + '|' + op + '|' + bottom + '|' + fs;
+      if (rec._subStyleKey === cacheKey) return;
+      rec._subStyleKey = cacheKey;
+      ov.style.bottom = bottom + 'px';
+      inner.style.cssText = 'display:inline-block;max-width:88%;padding:.25em .6em;border-radius:.35em;'
+        + 'color:#fff;background:rgba(0,0,0,' + op + ');'
+        + 'font-size:' + fs + 'px;line-height:1.35;font-weight:500;white-space:pre-line;';
+    } catch (e) {}
+  }
+  function refreshSubOverlays() {
+    try {
+      for (const rec of badges.values()) {
+        try {
+          if (rec._customSub && rec._customSub.cues) {
+            ensureSubOverlay(rec);
+            applySubOverlayStyle(rec);
+            tickCustomSub(rec);
+          }
+        } catch (e) {}
+      }
+    } catch (e) {}
+  }
+  function tickCustomSub(rec) {
+    try {
+      const cs = rec._customSub;
+      const ov = rec._subOverlay, inner = rec._subOverlayInner;
+      if (!cs || !cs.cues || !ov || !inner || !ov.isConnected) return;
+      const v = rec.video;
+      if (!v || !v.isConnected) { ov.style.display = 'none'; return; }
+      if (cs.hidden) { ov.style.display = 'none'; return; }
+      if (clampNum(S.subSize, 0, 250, 35) <= 0) { ov.style.display = 'none'; return; }
+      let ct = 0;
+      try { ct = v.currentTime || 0; } catch (e) {}
+      const shift = clampNum(S.subShift, -10, 10, 0);
+      const act = [];
+      for (const c of cs.cues) {
+        if (ct >= c.start + shift && ct <= c.end + shift) act.push(c.text);
+        else if (c.start + shift > ct && act.length) break;
+        if (act.length >= 2) break;
+      }
+      if (!act.length) { ov.style.display = 'none'; return; }
+      applySubOverlayStyle(rec);
+      inner.innerHTML = act.map(subTextToHtml).join('<br>');
+      ov.style.display = 'block';
+    } catch (e) {}
+  }
+  function tickCustomSubsAll() {
+    try {
+      for (const rec of badges.values()) {
+        try { if (rec._customSub && rec._customSub.cues) tickCustomSub(rec); } catch (e) {}
+      }
+    } catch (e) {}
+  }
+  function setCustomTrackMode(rec, mode) {
+    try {
+      const cs = rec._customSub;
+      if (!cs) return false;
+      cs.hidden = (mode !== 'showing');
+      try { tickCustomSub(rec); } catch (e) {}
+      return true;
+    } catch (e) { return false; }
+  }
+  function clearCustomSub(rec, silent) {
+    try {
+      const cs = rec._customSub;
+      if (!cs && !rec._subOverlay) return;
+      try { if (rec._subOverlay) rec._subOverlay.remove(); } catch (e) {}
+      rec._subOverlay = null;
+      rec._subOverlayInner = null;
+      rec._customSub = null;
+      try { paintCustomSub(rec); } catch (e) {}
+      if (!silent) sayCustom(rec, 'Свои субтитры убраны');
+    } catch (e) {}
+  }
+  function paintCustomSub(rec) {
+    try {
+      const box = rec.panel && rec.panel.querySelector('.customsub');
+      if (!box) return;
+      const cs = rec._customSub;
+      if (!cs) { box.style.display = 'none'; box.innerHTML = ''; return; }
+      box.style.display = 'block';
+      box.innerHTML = '';
+      const head = document.createElement('div');
+      head.className = 'subnote';
+      head.textContent = '✓ ' + cs.name + ' · фраз: ' + cs.cues.length + (cs.hidden ? ' (скрыты)' : ' (показываю)');
+      box.appendChild(head);
+      const row = document.createElement('div');
+      row.className = 'subrow';
+      const tgl = document.createElement('button');
+      tgl.className = 'subbtn';
+      tgl.textContent = cs.hidden ? 'Показать' : 'Скрыть';
+      tgl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setCustomTrackMode(rec, cs.hidden ? 'showing' : 'disabled');
+        try { paintCustomSub(rec); } catch (x) {}
+      });
+      const del = document.createElement('button');
+      del.className = 'subbtn';
+      del.textContent = 'Убрать';
+      del.addEventListener('click', (e) => { e.stopPropagation(); clearCustomSub(rec); });
+      row.appendChild(tgl);
+      row.appendChild(del);
+      box.appendChild(row);
+    } catch (e) {}
+  }
+  async function loadCustomSrt(rec, file) {
+    try {
+      const fname = (file && file.name) || 'свои.srt';
+      if (!/\.srt$/i.test(fname)) { sayCustom(rec, 'Пока беру только .srt — выберите файл с расширением .srt'); return; }
+      let buf = null;
+      try { buf = await file.arrayBuffer(); } catch (e) { sayCustom(rec, 'Не прочитался файл'); return; }
+      const raw = decodeSrtBuffer(buf);
+      if (!raw || !/-->/.test(raw)) { sayCustom(rec, 'Это не похоже на .srt (нет строк со временем)'); return; }
+      const cues = parseSrtCues(raw);
+      if (!cues.length) { sayCustom(rec, 'Не смог понять .srt'); return; }
+      const video = rec.video;
+      if (!video || !video.isConnected) { sayCustom(rec, 'Видео уже нет на странице — откройте панель заново'); return; }
+      // старые свои субтитры (и остатки <track> от прошлой версии) сносим
+      try { clearCustomSub(rec, true); } catch (e) {}
+      try {
+        if (video.querySelectorAll) {
+          for (const t of video.querySelectorAll('track')) {
+            try { if (t.src && String(t.src).startsWith('blob:')) t.remove(); } catch (e) {}
+          }
+        }
+      } catch (e) {}
+      let short = String(fname).replace(/\.srt$/i, '').slice(0, 40) || 'Свои';
+      rec._customSub = { name: short, cues, hidden: false };
+      try { ensureSubOverlay(rec); } catch (e) {}
+      try { applySubOverlayStyle(rec); } catch (e) {}
+      try { tickCustomSub(rec); } catch (e) {}
+      try { paintCustomSub(rec); } catch (e) {}
+      sayCustom(rec, '«' + short + '» поверх видео (' + cues.length + ' фраз). Вид — в настройках расширения.');
+    } catch (e) { try { sayCustom(rec, 'Не получилось подключить'); } catch (x) {} }
+  }
+  function collectSubtitles(video) {
+    const out = [];
+    const seenSrc = new Set();
+    // 1) <track> элементы: прямой src файла (обычно то же, что в меню субтитров плеера)
+    try {
+      const els = [];
+      try { if (video.querySelectorAll) for (const t of video.querySelectorAll('track')) els.push(t); } catch (e) {}
+      try { for (const t of deepQueryAll('track')) { if (!els.includes(t)) els.push(t); } } catch (e) {}
+      for (const el of els) {
+        let src = '';
+        try { src = el.src || (el.getAttribute && el.getAttribute('src')) || ''; } catch (e) {}
+        if (!src) continue;
+        try { src = new URL(src, location.href).href; } catch (e) {}
+        if (seenSrc.has(src)) continue;
+        seenSrc.add(src);
+        let label = '', lang = '', kind = '';
+        try {
+          label = (el.getAttribute && el.getAttribute('label')) || el.label || '';
+          lang = (el.getAttribute && el.getAttribute('srclang')) || el.srclang || '';
+          kind = ((el.getAttribute && el.getAttribute('kind')) || el.kind || '').toLowerCase();
+        } catch (e) {}
+        if (kind && kind !== 'subtitles' && kind !== 'captions' && kind !== 'metadata') continue;
+        out.push({ label: label || lang || ('Субтитры ' + (out.length + 1)), lang, src, kind, trackIndex: -1, cues: null, mode: '' });
+      }
+    } catch (e) {}
+    // 2) video.textTracks: привязываем src по языку/названию, остальное — встроенные (скачаем через cues → .srt)
+    try {
+      const tt = video.textTracks;
+      if (tt) {
+        for (let i = 0; i < tt.length; i++) {
+          const t = tt[i];
+          let label = '', lang = '', mode = '', cues = null;
+          try { label = t.label || ''; lang = t.language || ''; mode = t.mode || ''; } catch (e) {}
+          try { cues = (t.cues && t.cues.length !== undefined) ? t.cues.length : null; } catch (e) {}
+          let matched = null;
+          for (const o of out) {
+            if (o.trackIndex !== -1) continue;
+            const sameLang = o.lang && lang && o.lang.toLowerCase() === String(lang).toLowerCase();
+            const sameLabel = o.label && label && o.label === label;
+            if (sameLang || sameLabel) { matched = o; break; }
+          }
+          if (matched) {
+            matched.trackIndex = i; matched.cues = cues; matched.mode = mode;
+            if (!matched.label) matched.label = label || lang;
+            continue;
+          }
+          if (out.some((o) => o.trackIndex === i)) continue;
+          out.push({ label: label || lang || ('Субтитры ' + (out.length + 1)), lang, src: '', kind: '', trackIndex: i, cues, mode });
+        }
+      }
+    } catch (e) {}
+    // 3) ресурсы .vtt/.srt/.ttml, которые плеер уже подгрузил мимо <track>
+    try {
+      const entries = (performance.getEntriesByType) ? performance.getEntriesByType('resource') : [];
+      for (const en of entries) {
+        const u = (en && en.name) || '';
+        if (!/\.(vtt|srt|ttml)(\?|#|$)/i.test(u)) continue;
+        if (seenSrc.has(u)) continue;
+        seenSrc.add(u);
+        let fn = '';
+        try { fn = decodeURIComponent(u.split('/').pop().split('?')[0].split('#')[0]); } catch (e) {}
+        out.push({ label: fn || ('Файл ' + (out.length + 1)), lang: '', src: u, kind: 'file', trackIndex: -1, cues: null, mode: '' });
+      }
+    } catch (e) {}
+    // 4) прямые ссылки <a href="*.vtt|*.srt"> на странице
+    try {
+      for (const a of deepQueryAll('a[href]')) {
+        let href = '';
+        try { href = a.href || (a.getAttribute && a.getAttribute('href')) || ''; } catch (e) {}
+        if (!/\.(vtt|srt)(\?|#|$)/i.test(href)) continue;
+        let abs = href;
+        try { abs = new URL(href, location.href).href; } catch (e) {}
+        if (seenSrc.has(abs)) continue;
+        seenSrc.add(abs);
+        const txt = ((a.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 40)) || abs.split('/').pop();
+        out.push({ label: txt, lang: '', src: abs, kind: 'link', trackIndex: -1, cues: null, mode: '' });
+      }
+    } catch (e) {}
+    // 5) URL субтитров, зашитые в скрипты/разметку: CDN-плеер (rezka и зеркала)
+    // держит ссылки на .vtt в JS-конфиге, а не в <track> — вытягиваем их из HTML
+    try {
+      const html = document.documentElement ? document.documentElement.innerHTML : '';
+      if (html && html.length < 8000000) {
+        const re = /https?:\/\/[^\s"'<>\\\]]+?\.(vtt|srt|ttml)(\?[^\s"'<>\\\]]*)?/gi;
+        let mm = null, guard = 0;
+        while ((mm = re.exec(html)) && guard++ < 50) {
+          const u = mm[0];
+          if (seenSrc.has(u)) continue;
+          seenSrc.add(u);
+          let fn = '';
+          try { fn = decodeURIComponent(u.split('/').pop().split('?')[0]); } catch (e) {}
+          out.push({ label: fn || ('Файл ' + (out.length + 1)), lang: '', src: u, kind: 'page', trackIndex: -1, cues: null, mode: '' });
+        }
+      }
+    } catch (e) {}
+    // 6) меню «Субтитры» CDN-плеера: ПОЛНЫЙ список дорожек с человеческими названиями.
+    // Плеер регистрирует в video/textTracks обычно только включённую дорожку,
+    // а пункты его меню лежат в DOM всегда (как пункты качества [f2id]) —
+    // читаем их, чтобы показать все дорожки, а не только загруженную.
+    try {
+      // 6а) строка «Субтитры …» ([fid]) — какая дорожка выбрана сейчас
+      try {
+        for (const el of deepQueryAll('[fid]')) {
+          const t = (((el.innerText || el.textContent) || '').trim().replace(/\s+/g, ' '));
+          if (!/субтитр/i.test(t)) continue;
+          const m = t.replace(/субтитры?/i, '').replace(/^[\s:—–-]+/, '').trim();
+          if (m && !/^(выкл|off|нет)/i.test(m)) { out._menuActive = m; break; }
+        }
+      } catch (e) {}
+      // 6б) пункты-кандидаты: со словами, но не качество и не скорость
+      try {
+        const seenMenu = new Set();
+        for (const el of deepQueryAll('[f2id],[role="menuitem"],[role="option"]')) {
+          try { if (el.getAttribute && el.getAttribute('f2id') === '0') continue; } catch (e) {} // заголовок «Субтитры»
+          // Скрытые пункты тоже берём (меню обычно закрыто) — но только из подменю
+          // «Субтитры»: проверяем заголовок f2id=0 в том же контейнере. Без заголовка
+          // (generic-плееры) — берём с обычными фильтрами.
+          let ownSub = 0;
+          try {
+            const par = el.parentElement;
+            if (par && par.querySelectorAll) {
+              const hs = par.querySelectorAll('[f2id="0"]');
+              ownSub = 0;
+              for (const h of hs) {
+                let ht = '';
+                try { ht = (((h.innerText || h.textContent) || '').trim().replace(/\s+/g, ' ')); } catch (e) {}
+                if (!ht) continue;
+                if (/субтитр/i.test(ht)) { ownSub = 1; break; }
+                if (/качеств|скорост|масштаб|звук|audio|quality|speed/i.test(ht)) { ownSub = -1; break; }
+              }
+              if (ownSub < 0) continue;
+            }
+          } catch (e) {}
+          let t = '';
+          try {
+            const kids = el.querySelectorAll ? el.querySelectorAll('*') : [];
+            for (const c of kids) {
+              let st = '';
+              try { st = (c.getAttribute && c.getAttribute('style')) || ''; } catch (e) {}
+              if (/float\s*:\s*left/i.test(st)) {
+                try { t = ((((c.innerText || c.textContent) || '').trim().split('\n')[0]) || '').trim(); } catch (e) {}
+                if (t) break;
+              }
+            }
+            if (!t) t = ((((el.innerText || el.textContent) || '').trim().split('\n')[0] || '').trim());
+          } catch (e) {}
+          if (!t || t.length > 40) continue;
+          if (!/[а-яА-ЯёЁa-zA-Z]/.test(t)) continue; // «1.5» скорости не берём
+          if (/^(выкл|off|нет|disabled|откл)/i.test(t)) continue; // «без субтитров»
+          if (/^(обычная|normal|standard)$/i.test(t)) continue; // значение скорости, не дорожка
+          if (/качеств|скорост|субтитр|звук|аудио|audio|quality|speed|масштаб|airplay|параметр/i.test(t)) continue;
+          if (extractQToken(t)) continue; // пункты качества
+          // синяя метка активного пункта прямо в меню (надёжнее строки [fid])
+          try {
+            let mkA = false;
+            try { if (el.getAttribute && el.getAttribute('aria-selected') === 'true') mkA = true; } catch (e) {}
+            if (!mkA) {
+              try {
+                const cnA = (el.className && el.className.baseVal !== undefined) ? el.className.baseVal : el.className;
+                if (/(^|[^a-z])active([^a-z]|$)/i.test(String(cnA || ''))) mkA = true;
+              } catch (e) {}
+            }
+            if (mkA && ownSub >= 0 && t) out._menuActive = t;
+          } catch (e) {}
+          const k = normSubLabel(t);
+          if (!k || seenMenu.has(k)) continue;
+          seenMenu.add(k);
+          const ex = out.find((o) => normSubLabel(o.label) === k || (o.lang && normSubLabel(o.lang) === k));
+          const isActive = !!(out._menuActive && normSubLabel(out._menuActive) === k);
+          if (ex) { ex.menuName = true; if (isActive) ex.menuActive = true; continue; }
+          out.push({ label: t, lang: '', src: '', kind: 'menu', trackIndex: -1, cues: null, mode: '', menuName: true, menuActive: isActive });
+        }
+      } catch (e) {}
+    } catch (e) {}
+    out.forEach((it, i) => { it._idx = i; });
+    return out;
+  }
+  // Текст файла: сначала напрямую, при отказе (CORS чужого CDN) — через background,
+  // у него host_permissions и страницевый CORS не мешает.
+  async function fetchSubText(url) {
+    try {
+      const r = await fetch(url, { credentials: 'include' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const t = await r.text();
+      if (!t.trim()) throw new Error('пустой файл');
+      return t;
+    } catch (e) {
+      let res = null;
+      try { res = await chrome.runtime.sendMessage({ type: 'vm-fetch-sub', url }); }
+      catch (x) { throw e; }
+      if (res && res.ok && res.text) return res.text;
+      throw new Error((res && res.error) || (e && e.message) || 'fetch-fail');
+    }
+  }
+  // Автооткрытие меню «Субтитры» плеера (как цепочка качества): читаем ВСЕ дорожки
+  // без кликов пользователя. Возвращает {items:[{label,el,active}], active, close}.
+  // Если подменю уже открыто — просто читаем видимое. Закрытие — через Escape.
+  async function subsMenuSnapshot(video, keepOpen) {
+    const out = { items: [], active: '', close: async () => {} };
+    try {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      let wideScope = false;
+      let scopeEl = null;
+      try { scopeEl = containerOf(video); } catch (e) {}
+      const inScope = (el) => {
+        if (wideScope) return true;
+        if (!scopeEl || scopeEl === document) return true;
+        try { return !!(scopeEl.contains && scopeEl.contains(el)); } catch (e) { return true; }
+      };
+      // Пункты меню плеера: [f2id] (f2id=0 — заголовок «Субтитры», пропускаем),
+      // название — в дочернем блоке с float:left. Обычные div страницы НЕ трогаем.
+      const isSubItem = (el) => {
+        try { if (el.getAttribute && el.getAttribute('f2id') === '0') return ''; } catch (e) {}
+        let t = '';
+        try {
+          const kids = el.querySelectorAll ? el.querySelectorAll('*') : [];
+          for (const c of kids) {
+            let st = '';
+            try { st = (c.getAttribute && c.getAttribute('style')) || ''; } catch (e) {}
+            if (/float\s*:\s*left/i.test(st)) {
+              try { t = ((((c.innerText || c.textContent) || '').trim().split('\n')[0]) || '').trim(); } catch (e) {}
+              if (t) break;
+            }
+          }
+          if (!t) t = ((((el.innerText || el.textContent) || '').trim().split('\n')[0] || '').trim());
+        } catch (e) {}
+        if (!t || t.length > 40) return '';
+        if (!/[а-яА-ЯёЁa-zA-Z]/.test(t)) return '';
+        if (/^(выкл|off|нет|disabled|откл)/i.test(t)) return '';
+        if (/качеств|скорост|субтитр|звук|аудио|audio|quality|speed|масштаб|airplay|параметр/i.test(t)) return '';
+        try { if (extractQToken(t)) return ''; } catch (e) {}
+        return t;
+      };
+      const isActiveEl = (el) => {
+        try {
+          if (el.getAttribute && (el.getAttribute('aria-selected') === 'true' || el.getAttribute('aria-checked') === 'true')) return true;
+          const cn = (el.className && el.className.baseVal !== undefined) ? el.className.baseVal : el.className;
+          if (/(^|[^a-z])active([^a-z]|$)|selected|checked|current/i.test(String(cn || ''))) return true;
+        } catch (e) {}
+        return false;
+      };
+      const readVisible = () => {
+        const arr = [];
+        try {
+          for (const el of deepQueryAll('[f2id],[role="menuitem"],[role="option"]')) {
+            if (!inScope(el)) continue;
+            let vis = false;
+            try { vis = visible(el); } catch (e) {}
+            if (!vis) continue;
+            const t = isSubItem(el);
+            if (!t) continue;
+            arr.push({ label: t, el, active: isActiveEl(el) });
+          }
+        } catch (e) {}
+        const seen = new Set(); const res = [];
+        for (const it of arr) {
+          const k = normSubLabel(it.label);
+          if (!k || seen.has(k)) continue;
+          seen.add(k); res.push(it);
+        }
+        return res;
+      };
+      const pressEsc = async () => {
+        try {
+          const ev = new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true });
+          try { (document.activeElement || document.body || document).dispatchEvent(ev); } catch (e) {}
+          try { document.dispatchEvent(ev); } catch (e) {}
+        } catch (e) {}
+        await wait(350);
+      };
+      out.close = pressEsc;
+      const finish = async () => { if (!keepOpen) await pressEsc(); return out; };
+      // 1) подменю уже открыто — читаем видимое
+      let items = readVisible();
+      if (!items.length) { wideScope = true; try { items = readVisible(); } catch (e) {} }
+      if (items.length) {
+        out.items = items;
+        const a = items.find((x) => x.active);
+        if (a) out.active = a.label;
+        return finish();
+      }
+      // 2) прямая кнопка субтитров (CC)
+      let opener = null;
+      try {
+        const btns = deepQueryAll('button,[role="button"],pjsdiv');
+        for (const el of btns) {
+          if (!inScope(el)) continue;
+          let vis = false;
+          try { vis = visible(el); } catch (e) {}
+          if (!vis) continue;
+          let a = '';
+          try { a = ((el.getAttribute && (el.getAttribute('aria-label') || '')) + ' ' + ((el.getAttribute && (el.getAttribute('title') || '')))); } catch (e) {}
+          if (/субтитр|subtitle|caption/i.test(a)) { opener = el; break; }
+        }
+        if (!opener) {
+          for (const el of btns) {
+            if (!inScope(el)) continue;
+            let vis = false;
+            try { vis = visible(el); } catch (e) {}
+            if (!vis) continue;
+            let t = '';
+            try { t = (((el.innerText || el.textContent) || '').trim()); } catch (e) {}
+            if (/^(cc|субтитры)$/i.test(t)) { opener = el; break; }
+          }
+        }
+      } catch (e) {}
+      if (opener) {
+        try { mouseClick(opener); logDom('SUBS: клик по кнопке субтитров -> ' + describeEl(opener)); } catch (e) {}
+        await wait(600);
+        items = readVisible();
+        if (items.length) {
+          out.items = items;
+          const a = items.find((x) => x.active);
+          if (a) out.active = a.label;
+        } else {
+          try { await pressEsc(); } catch (e) {}
+          try { mouseClick(opener); } catch (e) {}
+          await wait(400);
+        }
+        return finish();
+      }
+      // 3) через шестерёнку: настройки → строка «Субтитры»
+      let gear = null;
+      try {
+        const ctl = domCtl.get(video);
+        if (ctl && ctl.gear) {
+          let alive = false;
+          try { alive = !!(document.contains ? document.contains(ctl.gear) : true); } catch (e) { alive = true; }
+          if (alive) {
+            let vis = false;
+            try { vis = visible(ctl.gear); } catch (e) {}
+            if (vis) gear = ctl.gear;
+          }
+        }
+      } catch (e) {}
+      if (gear) {
+        try { mouseClick(gear); logDom('SUBS: клик по шестерёнке -> ' + describeEl(gear)); } catch (e) {}
+        await wait(500);
+        let row = null;
+        try {
+          for (const el of deepQueryAll('[fid],button,[role="button"],pjsdiv')) {
+            if (!inScope(el)) continue;
+            let vis = false;
+            try { vis = visible(el); } catch (e) {}
+            if (!vis) continue;
+            let t = '';
+            try { t = (((el.innerText || el.textContent) || '').trim().replace(/\s+/g, ' ')); } catch (e) {}
+            if (!/субтитр/i.test(t)) continue;
+            try { if (extractQToken(t)) continue; } catch (e) {}
+            row = el; break;
+          }
+        } catch (e) {}
+        if (row) {
+          try { mouseClick(row); logDom('SUBS: клик по строке субтитров -> ' + describeEl(row)); } catch (e) {}
+          await wait(600);
+          items = readVisible();
+          if (items.length) {
+            out.items = items;
+            const a = items.find((x) => x.active);
+            if (a) out.active = a.label;
+          }
+        }
+        return finish();
+      }
+      // 3b) шестерёнка не закэширована (цепочка качества её не искала —
+      // [fid]-строки нашлись сразу): ищем как цепочка качества, по одной
+      // кнопке за ~2.5с, пока не откроются настройки
+      if (!gear) {
+        try {
+          let ctl3b = null;
+          try { ctl3b = domCtl.get(video); } catch (e) { ctl3b = null; }
+          if (!ctl3b) { ctl3b = {}; try { domCtl.set(video, ctl3b); } catch (e) {} }
+          for (let gi = 0; gi < 6 && !gear; gi++) {
+            let opened = false;
+            try { opened = settingsVisible(); } catch (e) {}
+            if (opened) break;
+            try { gearStep(video, ctl3b); } catch (e) {}
+            await wait(2600);
+            try {
+              if (ctl3b.gear) {
+                let alive = false;
+                try { alive = !!(document.contains ? document.contains(ctl3b.gear) : true); } catch (e) { alive = true; }
+                if (alive) { let v = false; try { v = visible(ctl3b.gear); } catch (e) {} if (v) gear = ctl3b.gear; }
+              }
+            } catch (e) {}
+          }
+        } catch (e) {}
+        if (gear) {
+          try { mouseClick(gear); logDom('SUBS: клик по найденной шестерёнке -> ' + describeEl(gear)); } catch (e) {}
+          await wait(500);
+          let row = null;
+          try {
+            for (const el of deepQueryAll('[fid],button,[role="button"],pjsdiv')) {
+              if (!inScope(el)) continue;
+              let vis = false;
+              try { vis = visible(el); } catch (e) {}
+              if (!vis) continue;
+              let t = '';
+              try { t = (((el.innerText || el.textContent) || '').trim().replace(/\s+/g, ' ')); } catch (e) {}
+              if (!/субтитр/i.test(t)) continue;
+              try { if (extractQToken(t)) continue; } catch (e) {}
+              row = el; break;
+            }
+          } catch (e) {}
+          if (row) {
+            try { mouseClick(row); logDom('SUBS: клик по строке субтитров -> ' + describeEl(row)); } catch (e) {}
+            await wait(600);
+            items = readVisible();
+            if (items.length) {
+              out.items = items;
+              const a = items.find((x) => x.active);
+              if (a) out.active = a.label;
+            }
+          }
+          try { await pressEsc(); } catch (e) {}
+          return finish();
+        }
+      }
+      return finish();
+    } catch (e) {}
+    return out;
+  }
+  // Включить дорожку в самом плеере (клик по пункту его меню) — для скачивания в один клик
+  // Текущая дорожка по строке «Субтитры …» ([fid]) — для проверки переключения.
+  function readMenuActiveSub() {
+    let seen = false, val = '';
+    try {
+      for (const el of deepQueryAll('[fid]')) {
+        let t = '';
+        try { t = (((el.innerText || el.textContent) || '').trim().replace(/\s+/g, ' ')); } catch (e) {}
+        if (!/субтитр/i.test(t)) continue;
+        seen = true;
+        const m = t.replace(/субтитры?/i, '').replace(/^[\s:—–-]+/, '').trim();
+        if (m && !/^(выкл|off|нет)/i.test(m)) { val = m; break; }
+      }
+    } catch (e) {}
+    return { seen, val };
+  }
+  async function enableMenuSub(video, label) {
+    try {
+      const k = normSubLabel(label);
+      if (!k) return false;
+      for (let att = 0; att < 3; att++) {
+        let snap = null;
+        try { snap = await subsMenuSnapshot(video, true); } catch (e) { snap = null; }
+        let tgt = null;
+        try { tgt = ((snap && snap.items) || []).find((x) => normSubLabel(x.label) === k); } catch (e) {}
+        // пункт мог отстегнуться от DOM между чтением и кликом (плеер перерисовал
+        // меню) — ищем свежий элемент с тем же названием прямо в документе
+        let el = (tgt && tgt.el && tgt.el.isConnected) ? tgt.el : null;
+        if (!el) {
+          try {
+            const all = deepQueryAll('[f2id],[role="menuitem"],[role="option"]');
+            for (const c of all) {
+              let t = '';
+              try { t = ((((c.innerText || c.textContent) || '').trim().split('\n')[0]) || '').trim(); } catch (e) {}
+              if (t && normSubLabel(t) === k && c.isConnected) { el = c; break; }
+            }
+          } catch (e) {}
+        }
+        if (!el) { try { if (snap) await snap.close(); } catch (e) {} continue; }
+        try { mouseClick(el); logDom('SUBS: включаю дорожку -> ' + describeEl(el)); } catch (e) {}
+        await new Promise((r) => setTimeout(r, 900));
+        let chk = { seen: false, val: '' };
+        try { chk = readMenuActiveSub() || chk; } catch (e) {}
+        try { if (snap) await snap.close(); } catch (e) {}
+        if (chk.val && normSubLabel(chk.val) === k) return true;
+        if (!chk.seen) return true; // строку не видно — считаем, что клик дошёл
+        await new Promise((r) => setTimeout(r, 600));
+      }
+      return false;
+    } catch (e) { return false; }
+  }
+  async function downloadSubtitle(item, video, statusEl, rec, retry) {
+    const say = (t) => { try { if (statusEl) { statusEl.style.display = ''; statusEl.textContent = t; } } catch (e) {} };
+    const hname = humanSubLabel(item) || item.label || 'дорожка';
+    try {
+      say('Качаю…');
+      // дорожка из меню плеера без файла: включаем её сами и качаем (как с качеством — в один клик).
+      // Переключение субтитров мгновенное (видео не перезапускается): плеер тут же
+      // тянет файл — ловим его опросом сети и качаем сразу с человеческим именем.
+      if (!item.netUrl && !item.src && item.menuName && rec && !retry) {
+        let known = null;
+        try {
+          known = new Set();
+          const r0 = await chrome.runtime.sendMessage({ type: 'vm-subs-get' });
+          for (const n of ((r0 && r0.subs) || [])) { if (n && n.url) known.add(n.url); }
+          for (const x of (rec._subsItems || [])) { if (x && (x.netUrl || x.src)) known.add(x.netUrl || x.src); }
+        } catch (e) { try { known = new Set(); } catch (e2) {} }
+        say('Включаю «' + hname + '»…');
+        let ok = false;
+        try { ok = await enableMenuSub(video, humanSubLabel(item) || item.label); } catch (e) { ok = false; }
+        if (!ok) { say('Не получилось включить «' + hname + '» — попробуйте чуть позже'); return; }
+        say('Подтягиваю «' + hname + '»…');
+        let fresh = null;
+        try {
+          for (let i = 0; i < 7 && !fresh; i++) {
+            await new Promise((r) => setTimeout(r, 700));
+            let r1 = null;
+            try { r1 = await chrome.runtime.sendMessage({ type: 'vm-subs-get' }); } catch (e) {}
+            const arr = (r1 && r1.subs) || [];
+            for (let k = arr.length - 1; k >= 0; k--) {
+              const u = arr[k] && arr[k].url;
+              if (u && known && !known.has(u)) { fresh = arr[k]; break; }
+            }
+          }
+        } catch (e) {}
+        try { rec._subsMenuAt = 0; rec._subsCache = null; await renderSubsList(rec); } catch (e) {}
+        if (fresh && fresh.url) {
+          const m = String(fresh.url).match(/\.(vtt|srt|ttml|ass|ssa|smi|sbv)(\?|#|$)/i);
+          const g = m ? m[1].toLowerCase() : (fresh.ext ? String(fresh.ext).replace(/^\./, '') : 'vtt');
+          const dn = niceSubName(item, g) || fresh.fileName || subFileName(item.label, g, item._idx || 0);
+          try {
+            const res = await chrome.runtime.sendMessage({ type: 'vm-subs-download', url: fresh.url, filename: dn });
+            if (res && res.ok) { say(res.pending ? ('Качается в фоне: ' + dn) : ('Готово: ' + dn)); return; }
+          } catch (e) {}
+          try {
+            const text = await fetchSubText(fresh.url);
+            saveBlobAs(new Blob([text], { type: 'text/plain;charset=utf-8' }), dn);
+            say('Готово: ' + dn);
+            return;
+          } catch (e) {}
+        }
+        let upd = null;
+        try { upd = (rec._subsItems || []).find((x) => normSubLabel(x.label) === normSubLabel(humanSubLabel(item) || item.label)); } catch (e) {}
+        if (upd && (upd.netUrl || upd.src)) { try { await downloadSubtitle(upd, video, statusEl, rec, true); } catch (e) {} return; }
+        say('«' + hname + '» пока не подгрузилась — откройте список чуть позже и нажмите снова');
+        return;
+      }
+      const url = item.netUrl || item.src;
+      if (url) {
+        const m = String(url).match(/\.(vtt|srt|ttml|ass|ssa|smi|sbv)(\?|#|$)/i);
+        const guessExt = m ? m[1].toLowerCase() : 'vtt';
+        // имя — человеческое («Русские-ru.vtt»), хеш CDN — только запасной вариант
+        const dlName = niceSubName(item, guessExt) || item.netFile || subFileName(item.label, guessExt, item._idx || 0);
+        // 1) загрузки браузера по точному URL: CORS не мешает, куки подставляются сами
+        try {
+          const res = await chrome.runtime.sendMessage({ type: 'vm-subs-download', url, filename: dlName });
+          if (res && res.ok) { say(res.pending ? ('Качается в фоне: ' + dlName) : ('Готово: ' + dlName)); return; }
+        } catch (e) {}
+        // 2) запасной путь: fetch (напрямую, при отказе — через background)
+        try {
+          const text = await fetchSubText(url);
+          const isVtt = /^\s*(﻿)?WEBVTT/i.test(text);
+          const name = niceSubName(item, isVtt ? 'vtt' : guessExt) || subFileName(item.label, isVtt ? 'vtt' : guessExt, item._idx || 0);
+          saveBlobAs(new Blob([text], { type: 'text/plain;charset=utf-8' }), name);
+          say('Готово: ' + name);
+          return;
+        } catch (e) {}
+        say('Не получилось скачать «' + hname + '» — попробуйте ещё раз чуть позже');
+        return;
+      }
+      // 3) файла нет: пробуем подтянуть фразы из плеера (hidden грузит, но не показывает)      let track = null;
+      try { track = video.textTracks && video.textTracks[item.trackIndex]; } catch (e) {}
+      if (!track) { say('«' + hname + '» ещё не подгружена — попробуйте чуть позже'); return; }
+      say('Подтягиваю «' + hname + '»…');
+      try { track.mode = 'hidden'; } catch (e) {}
+      await new Promise((r) => setTimeout(r, 1500));
+      const srt = cuesToSrt(track);
+      if (!srt) { say('Фраз пока нет — попробуйте чуть позже'); return; }
+      const name = niceSubName(item, 'srt') || subFileName(item.label, 'srt', item._idx || 0);
+      saveBlobAs(new Blob([srt], { type: 'text/plain;charset=utf-8' }), name);
+      say('Готово: ' + name);
+    } catch (e) { say('Ошибка: ' + String((e && e.message) || e).slice(0, 120)); }
+  }
+  function paintSubsList(rec, box, items) {
+    try {
+      box.innerHTML = '';
+      if (!items.length) {
+        const d = document.createElement('div');
+        d.className = 'subnote';
+        d.textContent = 'Субтитры пока не найдены — загляните чуть позже';
+        box.appendChild(d);
+        return;
+      }
+      for (const it of items) {
+        const b = document.createElement('button');
+        b.className = 'subbtn' + (it._ready ? '' : ' pending');
+        const nm = humanSubLabel(it) || it.label || 'Субтитры';
+        const extra = (!it.netUrl && !it.src && it.cues) ? ' · фраз: ' + it.cues : '';
+        b.textContent = '↓ ' + nm + ((it.lang && normSubLabel(it.lang) !== normSubLabel(nm)) ? ' (' + it.lang + ')' : '') + extra;
+        b.title = (it.netUrl || it.src) ? ('Скачать ' + nm) : (it.menuName ? ('Нажмите — включим «' + nm + '» и скачаем') : 'Встроенная дорожка — сохраним как .srt');
+        b.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const st = rec.panel.querySelector('.substatus');
+          downloadSubtitle(it, rec.video, st, rec);
+        });
+        box.appendChild(b);
+      }
+    } catch (e) {}
+  }
+
+  async function renderSubsList(rec, forceSnap) {
+    try {
+      const box = rec.panel.querySelector('.subs');
+      if (!box) return;
+      const now = Date.now();
+      // кэш на 30с — панель перерисовывается каждые 5с, не дёргаем сеть каждый раз
+      if (rec._subsCache && now - rec._subsCache.t < 30000 && rec._subsCache.items) {
+        paintSubsList(rec, box, rec._subsCache.items);
+      } else {
+        box.innerHTML = '<div class="subnote">Ищу субтитры…</div>';
+      }
+      if (rec._subsCache && now - rec._subsCache.t < 30000 && rec._subsCache.items) return;
+      let items = [];
+      try { items = collectSubtitles(rec.video); } catch (e) { items = []; }
+      const menuActiveSnap = (items && items._menuActive) || '';
+      // авточтение меню субтитров (как цепочка качества) — не чаще раза в 45с,
+      // чтобы не мигать настройками плеера при каждой перерисовке
+      let snap = null;
+      try {
+        const now2 = Date.now();
+        if (forceSnap || !rec._subsMenuAt || now2 - rec._subsMenuAt > 45000) {
+          rec._subsMenuAt = now2;
+          snap = await subsMenuSnapshot(rec.video, false);
+        }
+      } catch (e) { snap = null; }
+      if (snap && snap.items && snap.items.length) {
+        for (const sm of snap.items) {
+          const k = normSubLabel(sm.label);
+          const ex = items.find((o) => normSubLabel(o.label) === k || (o.lang && normSubLabel(o.lang) === k));
+          const isActive = !!((snap.active && normSubLabel(snap.active) === k) || sm.active);
+          if (ex) { ex.menuName = true; if (isActive) ex.menuActive = true; continue; }
+          items.push({ label: sm.label, lang: '', src: '', kind: 'menu', trackIndex: -1, cues: null, mode: '', menuName: true, menuActive: isActive });
+        }
+        if (snap.active) items._menuActive = snap.active;
+      }
+      const menuActive = (items && items._menuActive) || '';
+      // сеть: что плеер реально подгрузил (точные URL с подписями — качаются без CORS)
+      try {
+        const res = await chrome.runtime.sendMessage({ type: 'vm-subs-get' });
+        const net = (res && res.subs) || [];
+        const rest = [];
+        for (const n of net) {
+          if (!n || !n.url) continue;
+          const ex = items.find((it) => it.src === n.url);
+          if (ex) {
+            ex.netUrl = n.url; ex.netFile = n.fileName;
+            if (!ex.label || (/^(Файл |Субтитры )/i.test(ex.label) && !ex.lang && ex.trackIndex < 0 && !ex.menuName)) ex.label = n.fileName;
+            continue;
+          }
+          rest.push(n);
+        }
+        // самый свежий пойманный файл ↔ активная дорожка:
+        // включили в меню плеера — плеер именно этот файл и подгрузил
+        const nameHit = (nm) => items.find((it) => !it.netUrl && (normSubLabel(it.label) === nm || (it.lang && normSubLabel(it.lang) === nm)));
+        if (rest.length && menuActive) {
+          const tgt = nameHit(normSubLabel(menuActive));
+          if (tgt) { const n = rest[rest.length - 1]; tgt.netUrl = n.url; tgt.netFile = n.fileName; rest.splice(rest.indexOf(n), 1); }
+        }
+        if (rest.length === 1) {
+          const freeMenu = items.filter((it) => it.menuName && !it.netUrl && !it.src);
+          if (freeMenu.length === 1) {
+            const n = rest[0];
+            freeMenu[0].netUrl = n.url; freeMenu[0].netFile = n.fileName; rest.length = 0;
+          }
+        }
+        if (rest.length) {
+          const sh = items.find((it) => !it.netUrl && !it.src && it.mode === 'showing' && humanSubLabel(it));
+          if (sh) { const n = rest[rest.length - 1]; sh.netUrl = n.url; sh.netFile = n.fileName; rest.splice(rest.indexOf(n), 1); }
+        }
+        // свежий файл (появился после прошлого прохода) клеим к единственной
+        // активной дорожке без файла — даже если снимок меню в этот раз пропустили
+        try {
+          if (!(rec._knownNet instanceof Set)) rec._knownNet = new Set();
+          const freshOnes = rest.filter((n) => n && n.url && !rec._knownNet.has(n.url));
+          if (freshOnes.length === 1) {
+            const cand = items.filter((it) => !it.netUrl && !it.src && (it.menuActive || it.mode === 'showing' || it.menuName));
+            const act = cand.filter((it) => it.menuActive || it.mode === 'showing');
+            const tgt = act.length === 1 ? act[0] : (cand.length === 1 ? cand[0] : null);
+            if (tgt) { const n = freshOnes[0]; tgt.netUrl = n.url; tgt.netFile = n.fileName; rest.splice(rest.indexOf(n), 1); }
+          }
+          try { for (const n of net) { if (n && n.url) rec._knownNet.add(n.url); } } catch (e) {}
+        } catch (e) {}
+        // Финал без висячих хэшей: все неприкаянные файлы — в общий пул
+        // (остатки сети + найденные в странице), самый свежий уходит активной
+        // дорожке — пункт списка становится кнопкой скачивания. Остальные
+        // неприкаянные прячем, чтобы не плодить дубли-хэши.
+        try {
+          const normA2 = menuActive ? normSubLabel(menuActive) : '';
+          let tgt2 = null;
+          if (normA2) tgt2 = items.find((it) => !it.netUrl && !it.src && (normSubLabel(it.label) === normA2 || (it.lang && normSubLabel(it.lang) === normA2)));
+          if (!tgt2) tgt2 = items.find((it) => !it.netUrl && !it.src && it.mode === 'showing' && humanSubLabel(it));
+          if (!tgt2) {
+            const frees2 = items.filter((it) => !it.netUrl && !it.src && it.menuName);
+            if (frees2.length === 1) tgt2 = frees2[0];
+          }
+          const pool = [];
+          try {
+            for (const li of items) {
+              if ((li.netUrl || li.src) && !li.menuName && !li.menuActive && li.mode !== 'showing') pool.push({ url: li.netUrl || li.src, fileName: li.netFile || '', item: li });
+            }
+          } catch (e) {}
+          try { for (const rn of rest) { if (rn && rn.url) pool.push({ url: rn.url, fileName: rn.fileName || '', item: null }); } } catch (e) {}
+          try { rest.length = 0; } catch (e) {}
+          const seenU = new Set(); const uniq = [];
+          try {
+            for (let pi = pool.length - 1; pi >= 0; pi--) {
+              const cp = pool[pi];
+              if (!cp || !cp.url || seenU.has(cp.url)) continue;
+              seenU.add(cp.url); uniq.push(cp);
+            }
+            uniq.reverse();
+          } catch (e) {}
+          if (uniq.length) {
+            const newest = uniq[uniq.length - 1];
+            if (!tgt2 && normA2) {
+              tgt2 = { label: menuActive, lang: '', src: '', kind: 'menu', trackIndex: -1, cues: null, mode: '', menuName: true, menuActive: true };
+              items.push(tgt2);
+            }
+            if (tgt2) {
+              tgt2.netUrl = newest.url;
+              try { tgt2.netFile = newest.fileName || decodeURIComponent(String(newest.url).split('/').pop().split('?')[0]); } catch (e) {}
+              if (newest.item) { const gi = items.indexOf(newest.item); if (gi !== -1) items.splice(gi, 1); }
+            } else if (uniq.length === 1 && newest.item) {
+              try {
+                const lb = String(newest.item.label || '');
+                if (/\.(vtt|srt|ttml|ass|ssa|smi|sbv)(\?|#|$)/i.test(lb) || /^[a-z0-9]{8,}$/i.test(lb.replace(/\.\w+$/, '')) || /^(файл|субтитры)\s*\d*$/i.test(lb)) newest.item.label = 'Субтитры';
+              } catch (e) {}
+            }
+            for (const cp of uniq) {
+              if (cp === newest) continue;
+              if (cp.item) { const gi = items.indexOf(cp.item); if (gi !== -1) items.splice(gi, 1); }
+            }
+          }
+        } catch (e) {}
+      } catch (e) {}
+      items.forEach((it, i) => { it._idx = i; it._ready = !!(it.netUrl || (it.cues && it.cues > 0)); });
+      // готовые первыми, остальные по названию
+      try { items.sort((a, b) => (((b._ready ? 1 : 0) - (a._ready ? 1 : 0)) || String(a.label || '').localeCompare(String(b.label || ''), 'ru'))); } catch (e) {}
+      rec._subsItems = items;
+      rec._subsCache = { t: Date.now(), items };
+      const box2 = rec.panel.querySelector('.subs');
+      if (!box2 || !box2.isConnected || box2 !== box) return; // панель уже перерисована — новый проход сам всё покажет
+      paintSubsList(rec, box2, items);
     } catch (e) {}
   }
 
@@ -2177,9 +3401,22 @@
             rec.host.style.top = '14px';
             rec.host.style.transform = 'translateX(-50%)';
           }
+          // свои субтитры едут следом за бейджем, иначе их не видно
+          try {
+            if (rec._subOverlay && rec._subOverlay.isConnected &&
+                rec._subOverlay.parentElement !== fs && !fs.contains(rec._subOverlay)) {
+              fs.appendChild(rec._subOverlay);
+            }
+          } catch (e) {}
         } else {
           if (!video.isConnected) { rec.host.remove(); badges.delete(video); continue; }
           placeBadge(video, rec.host);
+          try {
+            if (rec._subOverlay && !rec._subOverlay.isConnected) {
+              rec._subOverlay = null; rec._subOverlayInner = null;
+              if (rec._customSub && rec._customSub.cues) ensureSubOverlay(rec);
+            }
+          } catch (e) {}
         }
       }
     } catch (e) {}
@@ -2225,7 +3462,7 @@
           else if (sk === 'd') setSpeed(desiredSpeed() + speedStep());
           else if (sk === 'r') toggleResetSpeed();
           else if (sk === 'g') {
-            const pref = clampSpeed(S.preferredSpeed || 1.8);
+            const pref = clampSpeed(S.preferredSpeed || 2);
             setSpeed(Math.abs(desiredSpeed() - 1) < 1e-9 ? pref : 1);
           }
         }
@@ -2236,6 +3473,7 @@
   // ---------- главный цикл
   function onMainState() {
     if (!isActive()) { refreshAllBadges(); return; }
+    const passive = speedPassive(); // >2×: скорость ставим, плеер не трогаем
     for (const v of document.querySelectorAll('video')) {
       try {
         if (v.__vm_skip) continue;
@@ -2243,7 +3481,7 @@
         watchSpeed(v);
         applySpeed(v);
         ensureBadge(v);
-        domTick(v);
+        if (!passive) domTick(v);
       } catch (e) {}
     }
     // аудио без картинки: бейдж не нужен, а скорость — да
@@ -2324,6 +3562,7 @@
         domCurRank: ctl ? ctl.curRank : -1,
         domClicks: ctl ? ctl.clicks : 0,
         domOpenerAgoSec: ctl && ctl.lastOpener ? Math.round((Date.now() - ctl.lastOpener) / 1000) : -1,
+        subSrcs: (() => { try { const o = []; for (const t of v.querySelectorAll('track')) { try { if (t.src) o.push(t.src.slice(0, 160)); } catch (e) {} } return o; } catch (e) { return []; } })(),
       };
     });
     return {
@@ -2368,7 +3607,7 @@
         } catch (e) { return { error: String(e) }; }
       })(),
       settings: { enabled: S.enabled, mode: S.mode, cap: S.cap, considerSize: S.considerSize, siteMode: S.siteMode },
-      speed: { want: desiredSpeed(), step: speedStep(), preferred: clampSpeed(S.preferredSpeed || 1.8), hotkeys: S.speedHotkeys !== false },
+      speed: { want: desiredSpeed(), step: speedStep(), preferred: clampSpeed(S.preferredSpeed || 2), hotkeys: S.speedHotkeys !== false },
       mainAlive,
       players: mainState.players || [],
       videos: vids,
@@ -2387,7 +3626,7 @@
         catch (e) { sendResponse({ error: String(e), version: VM_VERSION }); }
       };
       for (const v of vids) {
-        try { watchStall(v); watchSpeed(v); applySpeed(v); ensureBadge(v); domTick(v, true); } catch (e) {}
+        try { watchStall(v); watchSpeed(v); applySpeed(v); ensureBadge(v); if (!speedPassive()) domTick(v, true); else domScanOnly(v); } catch (e) {}
       }
       if (!vids.length && !(mainState.players || []).length) {
         // пустой фрейм отвечает с задержкой — первым отвечает фрейм с видео
@@ -2441,10 +3680,11 @@
     try { window.postMessage({ source: 'vm-cmd', type: 'vm-ping' }, '*'); } catch (e) {}
     setInterval(() => {
       if (!isActive()) return;
+      const passive = speedPassive(); // >2×: только скорость, без сканов/проб (не отъедаем трафик у потока)
       for (const v of document.querySelectorAll('video')) {
-        try { applySpeed(v); domTick(v); probeStreamMeta(v); probeStreamSizes(v); } catch (e) {}
+        try { applySpeed(v); if (!passive) { domTick(v); probeStreamMeta(v); probeStreamSizes(v); } else { domScanOnly(v); } } catch (e) {}
       }
-      try { topQsTick(); } catch (e) {} // топ-кадр собирает размеры для всех (видео обычно в iframe)
+      if (!passive) { try { topQsTick(); } catch (e) {} } // топ-кадр собирает размеры для всех (видео обычно в iframe)
       try {
         for (const a of document.querySelectorAll('audio')) {
           try { applySpeed(a); } catch (e) {}
@@ -2452,5 +3692,9 @@
       } catch (e) {}
       refreshAllBadges();
     }, 5000);
+    // свои субтитры: частый тик (5 с — слишком редко для фраз), дёшево: только видимые cues
+    setInterval(() => {
+      try { if (isActive()) tickCustomSubsAll(); } catch (e) {}
+    }, 250);
   })();
 })();

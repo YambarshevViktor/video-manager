@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Video Manager — настройки</title>
+<link rel="stylesheet" href="options.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="hero">
+    <img class="logo" src="icons/icon48.png" alt="Video Manager">
+    <div>
+      <h1>Video Manager</h1>
+      <p>Автоматический выбор качества видео</p>
+    </div>
+    <label class="switch big"><input type="checkbox" id="enabled"><span></span></label>
+  </header>
+
+  <section class="glass">
+    <h2>Режим качества</h2>
+    <div class="seg" id="modeSeg">
+      <button data-mode="smart"><b>Умный</b><i>старт по окну и сети, адаптация</i></button>
+      <button data-mode="max"><b>Максимум</b><i>всегда высшее, без снижений</i></button>
+      <button data-mode="manual"><b>Ручной</b><i>не выше потолка, без адаптации</i></button>
+    </div>
+    <h2>Потолок качества</h2>
+    <div class="caps" id="capRow"></div>
+    <label class="check"><input type="checkbox" id="considerSize"> Учитывать размер плеера (только умный режим)</label>
+  </section>
+
+  <section class="glass">
+    <h2>Бейдж поверх плеера</h2>
+    <label class="check"><input type="checkbox" id="badgeDefaultVisible"> Показывать бейдж при старте видео</label>
+    <label class="check"><input type="checkbox" id="closePanelOnShow"> Клавиша V закрывает открытую панель (показывает только значок)</label>
+    <div class="row">
+      <label class="hotkey">Горячая клавиша скрытия
+        <input id="hotkey" maxlength="1" placeholder="v">
+      </label>
+      <button class="btn" id="toggleHidden">Скрыть сейчас</button>
+      <button class="btn" id="badgeReset" title="Убрать скрытие на всех вкладках и сбросить запомненную позицию значка">Вернуть бейдж везде</button>
+    </div>
+    <p class="muted">Скрытие клавишей V действует только на текущей странице: новая загрузка страницы — и значок снова на месте.
+      Живёт до перезапуска браузера. Вернуть значок раньше — той же клавишей. Кнопка «Скрыть сейчас» — для вкладки, выбранной в «Диагностике вкладки» ниже.</p>
+  </section>
+
+  <section class="glass">
+    <h2>Скорость видео</h2>
+    <div class="row">
+      <label class="hotkey">Шаг S / D
+        <input id="speedStep" class="num" type="number" min="0.05" max="4" step="0.05">
+      </label>
+      <label class="hotkey">Избранная (G)
+        <input id="preferredSpeed" class="num" type="number" min="0.07" max="16" step="0.05">
+      </label>
+      <button class="btn" id="speedReset">Сбросить к 1.0</button>
+    </div>
+    <label class="check"><input type="checkbox" id="speedHotkeys"> Горячие клавиши S / D / R / G на странице с видео</label>
+    <p class="muted">S — медленнее, D — быстрее, R — сброс к 1.0 / возврат, G — переключение с избранной.
+      Работают и в русской раскладке, в полях ввода не срабатывают. V — показать / скрыть бейдж.</p>
+  </section>
+
+  <section class="glass">
+    <h2>Субтитры (свои .srt)</h2>
+    <p class="muted">Оформление своих субтитров поверх видео. Текст всегда белый на чёрном фоне.</p>
+    <div class="srow">
+      <label for="subSize">Размер текста</label>
+      <input id="subSize" type="range" min="0" max="250" step="5">
+      <output id="subSizeVal">35%</output>
+    </div>
+    <div class="srow">
+      <label for="subBgOpacity">Прозрачность фона</label>
+      <input id="subBgOpacity" type="range" min="0" max="1" step="0.05">
+      <output id="subBgOpacityVal">0.7</output>
+    </div>
+    <div class="srow">
+      <label for="subBottomMargin">Отступ снизу</label>
+      <input id="subBottomMargin" type="range" min="0" max="200" step="1">
+      <output id="subBottomMarginVal">32 px</output>
+    </div>
+    <div class="srow">
+      <label for="subShift">Сдвиг по времени</label>
+      <input id="subShift" type="range" min="-10" max="10" step="0.5">
+      <output id="subShiftVal">0 с</output>
+    </div>
+    <p class="muted">Сдвиг: + задерживает субтитры, − показывает раньше. 0 — как в файле.</p>
+    <div class="row">
+      <button class="btn" id="subReset">Сбросить настройки субтитров</button>
+    </div>
+  </section>
+
+  <section class="glass">
+    <h2>Зеркала HDRezka</h2>
+    <p class="muted">Расширение работает только на HDRezka и её зеркалах. Основной сайт (rezka.ag) уже в списке — добавляйте сюда зеркала по мере появления.</p>
+    <div class="row">
+      <input id="siteInput" class="text" placeholder="например: hdrezka.me или rezka.cc">
+      <button class="btn primary" id="addSite">Добавить зеркало</button>
+    </div>
+    <div class="sites" id="siteList"></div>
+    <p class="muted">Кнопка «Выкл здесь / Вкл здесь» в попапе (рядом с адресом сайта) отключает или включает расширение именно на этом зеркале и важнее общего списка. После изменения списка перезагрузите вкладки с видео — внедрение применяется при загрузке страницы.</p>
+  </section>
+
+  <section class="glass">
+    <h2>Диагностика вкладки</h2>
+    <p class="muted">Какой плеер пойман, какие уровни отдаёт сайт, что выбрано и почему. Полезно для rezka и зеркал.</p>
+    <div class="row">
+      <select id="diagTab" class="text"></select>
+      <button class="btn primary" id="diagBtn">Обновить диагностику</button>
+      <button class="btn" id="copyDiag">Скопировать JSON</button>
+    </div>
+    <pre class="diag" id="diagBox">Нажмите «Обновить» на вкладке с видео.</pre>
+  </section>
+
+  <section class="glass">
+    <h2>Данные</h2>
+    <div class="row">
+      <button class="btn" id="exportBtn">Экспорт настроек (JSON)</button>
+      <button class="btn" id="importBtn">Импорт настроек</button>
+      <input type="file" id="importFile" accept="application/json" hidden>
+    </div>
+  </section>
+</div>
+<script src="options.js"></script>
+</body>
+</html>

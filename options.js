@@ -6,7 +6,29 @@ let lastDiag = null;
 async function load() {
   return chrome.storage.local.get(['enabled', 'mode', 'cap', 'considerSize', 'badgeDefaultVisible',
     'closePanelOnShow', 'badgeHiddenTabs', 'hotkey', 'siteMode', 'sites', 'perSite',
-    'speed', 'speedStep', 'preferredSpeed', 'speedHotkeys']);
+    'speed', 'speedStep', 'preferredSpeed', 'speedHotkeys',
+    'subSize', 'subBgOpacity', 'subBottomMargin', 'subShift']);
+}
+
+const SUB_DEFAULTS = { subSize: 35, subBgOpacity: 0.7, subBottomMargin: 32, subShift: 0 };
+function clampNum(v, min, max, fb) {
+  let n = (typeof v === 'string') ? parseFloat(String(v).replace(',', '.')) : Number(v);
+  if (!isFinite(n)) return fb;
+  if (n < min) return min;
+  if (n > max) return max;
+  return Math.round(n * 100) / 100;
+}
+function subVals(s) {
+  return {
+    subSize: clampNum(s.subSize, 0, 250, SUB_DEFAULTS.subSize),
+    subBgOpacity: clampNum(s.subBgOpacity, 0, 1, SUB_DEFAULTS.subBgOpacity),
+    subBottomMargin: clampNum(s.subBottomMargin, 0, 200, SUB_DEFAULTS.subBottomMargin),
+    subShift: clampNum(s.subShift, -10, 10, SUB_DEFAULTS.subShift),
+  };
+}
+function fmtShift(v) {
+  const n = clampNum(v, -10, 10, 0);
+  return (n > 0 ? '+' : '') + (String(n).replace('.', ',')) + ' с';
 }
 
 // Вкладка, выбранная в «Диагностике вкладки», — кнопка «Скрыть сейчас» действует на неё
@@ -35,12 +57,21 @@ function render(s) {
   $('hotkey').value = s.hotkey || 'v';
   const selTab = diagSelTab();
   $('toggleHidden').textContent = (selTab !== null && s.badgeHiddenTabs && s.badgeHiddenTabs[selTab]) ? 'Показать сейчас' : 'Скрыть сейчас';
-  $('speedStep').value = (s.speedStep !== undefined ? s.speedStep : 0.25);
-  $('preferredSpeed').value = (s.preferredSpeed !== undefined ? s.preferredSpeed : 1.8);
+  $('speedStep').value = (s.speedStep !== undefined ? s.speedStep : 0.5);
+  $('preferredSpeed').value = (s.preferredSpeed !== undefined ? s.preferredSpeed : 2);
   $('speedHotkeys').checked = s.speedHotkeys !== false;
   $('speedReset').textContent = 'Сбросить к 1.0' + ((Number(s.speed) || 1) !== 1 ? ' (сейчас ' + s.speed + 'x)' : '');
-  document.querySelectorAll('#siteModeSeg button').forEach((b) =>
-    b.classList.toggle('on', b.dataset.sm === s.siteMode));
+  const sv = subVals(s);
+  $('subSize').value = sv.subSize;
+  $('subSizeVal').textContent = sv.subSize + '%';
+  $('subBgOpacity').value = sv.subBgOpacity;
+  $('subBgOpacityVal').textContent = String(sv.subBgOpacity).replace('.', ',');
+  $('subBottomMargin').value = sv.subBottomMargin;
+  $('subBottomMarginVal').textContent = sv.subBottomMargin + ' px';
+  $('subShift').value = sv.subShift;
+  $('subShiftVal').textContent = fmtShift(sv.subShift);
+  const sm = document.querySelectorAll('#siteModeSeg button');
+  if (sm.length) sm.forEach((b) => b.classList.toggle('on', b.dataset.sm === s.siteMode));
   renderSites(s);
 }
 
@@ -51,7 +82,7 @@ function renderSites(s) {
   const per = s.perSite || {};
   const perKeys = Object.keys(per);
   if (!sites.length && !perKeys.length) {
-    box.innerHTML = '<div class="empty">Список пуст. Добавьте домен выше.</div>';
+    box.innerHTML = '<div class="empty">Список пуст. Добавьте зеркало выше (по умолчанию работает rezka.ag).</div>';
     return;
   }
   for (const p of sites) {
@@ -120,6 +151,7 @@ async function refreshDiag() {
   try {
     await loadRecentTabs();
     const selTabId = $('diagTab').value ? Number($('diagTab').value) : undefined;
+    const out = [];
     // Самопочинка внедрения + строка статуса в начало отчёта
     try {
       const ar = await chrome.runtime.sendMessage({ type: 'vm-apply-scripts' });
@@ -146,14 +178,13 @@ async function refreshDiag() {
     const r = await chrome.runtime.sendMessage({ type: 'vm-diag-get', tabId: useTabId });
     lastDiag = r;
     const frames = (r && r.frames) || [];
-    const out = [];
     if (direct && direct.error) {
       out.push('ПРЯМАЯ СВЯЗЬ: НЕТ (' + direct.error + ')');
       out.push('Это значит, что контент-скрипт не внедрён в эту вкладку.');
       out.push('Что сделать: 1) перезагрузите вкладку с видео; 2) подождите 5–10 с воспроизведения; 3) нажмите «Обновить» снова.');
     } else if (direct && direct.res) {
       out.push('ПРЯМАЯ СВЯЗЬ: ЕСТЬ (топ-фрейм отвечает).');
-      out.push('версия скрипта во вкладке: ' + (direct.res.version || '?') + ' (должна быть 0.1.38 — если меньше, вкладка не перезагружена после обновления)');
+      out.push('версия скрипта во вкладке: ' + (direct.res.version || '?') + ' (должна быть 0.1.61 — если меньше, вкладка не перезагружена после обновления)');
       out.push('разведка DOM: ' + JSON.stringify(direct.res.recon || {}));
       for (const v of (direct.res.videos || [])) {
         out.push(`video ${v.size}${v.vmVid ? ' ← ' + v.vmVid : ''} текУровень=${v.domCurRank} кликов=${v.domClicks} открывалка=${v.domOpenerAgoSec >= 0 ? v.domOpenerAgoSec + 'с назад' : '—'}`);
@@ -202,23 +233,48 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (m[t]) delete m[t]; else m[t] = true;
     chrome.storage.local.set({ badgeHiddenTabs: m });
   });
+  $('badgeReset').addEventListener('click', async () => {
+    // Однокнопочный возврат значка: снять скрытие на всех вкладках,
+    // сбросить запомненную позицию (бейдж мог уехать за экран после драга),
+    // включить показ при старте. Без консоли.
+    await chrome.storage.local.set({ badgeHiddenTabs: {}, badgePos: {}, badgeDefaultVisible: true });
+    render(await load());
+  });
   $('speedStep').addEventListener('change', (e) => {
     let v = parseFloat(String(e.target.value).replace(',', '.'));
-    if (!isFinite(v) || v <= 0) v = 0.25;
+    if (!isFinite(v) || v <= 0) v = 0.5;
     v = Math.min(4, Math.max(0.05, Math.round(v * 100) / 100));
     e.target.value = v;
     chrome.storage.local.set({ speedStep: v });
   });
   $('preferredSpeed').addEventListener('change', (e) => {
     let v = parseFloat(String(e.target.value).replace(',', '.'));
-    if (!isFinite(v)) v = 1.8;
+    if (!isFinite(v)) v = 2;
     v = Math.min(16, Math.max(0.07, Math.round(v * 100) / 100));
     e.target.value = v;
     chrome.storage.local.set({ preferredSpeed: v });
   });
   $('speedHotkeys').addEventListener('change', (e) => chrome.storage.local.set({ speedHotkeys: e.target.checked }));
   $('speedReset').addEventListener('click', () => chrome.storage.local.set({ speed: 1 }));
-  document.querySelectorAll('#siteModeSeg button').forEach((b) =>
+  const subLive = (key, fmt) => {
+    $(key).addEventListener('input', (e) => {
+      const el = e.target;
+      const min = parseFloat(el.min), max = parseFloat(el.max);
+      const v = clampNum(el.value, min, max, SUB_DEFAULTS[key]);
+      $(key + 'Val').textContent = fmt(v);
+      chrome.storage.local.set({ [key]: v });
+    });
+  };
+  subLive('subSize', (v) => v + '%');
+  subLive('subBgOpacity', (v) => String(v).replace('.', ','));
+  subLive('subBottomMargin', (v) => v + ' px');
+  subLive('subShift', fmtShift);
+  $('subReset').addEventListener('click', async () => {
+    await chrome.storage.local.set({ ...SUB_DEFAULTS });
+    render(await load());
+  });
+  const smBtns = document.querySelectorAll('#siteModeSeg button');
+  if (smBtns.length) smBtns.forEach((b) =>
     b.addEventListener('click', () => chrome.storage.local.set({ siteMode: b.dataset.sm })));
   $('addSite').addEventListener('click', async () => {
     const v = $('siteInput').value.trim().toLowerCase();
@@ -260,7 +316,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       const data = JSON.parse(await f.text());
       const keys = ['enabled', 'mode', 'cap', 'considerSize', 'badgeDefaultVisible', 'closePanelOnShow', 'hotkey', 'siteMode', 'sites', 'perSite',
-        'speed', 'speedStep', 'preferredSpeed', 'speedHotkeys'];
+        'speed', 'speedStep', 'preferredSpeed', 'speedHotkeys',
+        'subSize', 'subBgOpacity', 'subBottomMargin', 'subShift'];
       const patch = {};
       for (const k of keys) if (data[k] !== undefined) patch[k] = data[k];
       await chrome.storage.local.set(patch);
