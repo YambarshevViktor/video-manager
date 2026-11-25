@@ -4,7 +4,7 @@
 
 const DEFAULTS = {
   enabled: true,
-  mode: 'smart', // smart | max | manual
+  mode: 'max', // max | smart | manual
   cap: 2160, // 360|480|720|1080|1081(1080 Ultra)|1440|2160
   considerSize: true,
   badgeDefaultVisible: true,

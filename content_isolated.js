@@ -7,7 +7,7 @@
 (() => {
   if (window.__VM_ISO_LOADED__) return;
   window.__VM_ISO_LOADED__ = true;
-  const VM_VERSION = '0.1.61'; // <-- сверяйте с manifest.json; если в диагностике версия меньше — вкладка не перезагружена
+  const VM_VERSION = '0.1.62'; // <-- сверяйте с manifest.json; если в диагностике версия меньше — вкладка не перезагружена
 
   // ---------- «Добавлено»: дата заливки серии/фильма (data/updates.json в репозитории)
   // Сборщик .github/workflows/updates-collect.yml раз в день парсит главную
@@ -167,7 +167,7 @@
   }
 
   const DEFAULTS = {
-    enabled: true, mode: 'smart', cap: 2160, considerSize: true,
+    enabled: true, mode: 'max', cap: 2160, considerSize: true,
     badgeDefaultVisible: true, hotkey: 'v', closePanelOnShow: true,
     siteMode: 'allowlist', sites: ['rezka.ag'], perSite: {}, badgeHiddenTabs: {},
     speed: 1, speedStep: 0.5, preferredSpeed: 2, speedHotkeys: true, lastSpeedBeforeReset: 0,
@@ -203,8 +203,8 @@
       S = { ...DEFAULTS, ...got };
       delete S.badgeHidden; // legacy-флаг больше не используем
       if (S.mode !== 'smart' && S.mode !== 'max' && S.mode !== 'manual') {
-        S.mode = 'smart'; // откат «быстрого»: чиним застрявшее значение
-        try { chrome.storage.local.set({ mode: 'smart' }); } catch (e) {}
+        S.mode = 'max'; // откат «быстрого»: чиним застрявшее значение
+        try { chrome.storage.local.set({ mode: 'max' }); } catch (e) {}
       }
       // старый общий флаг скрытия больше не используем — разово чистим;
       // новая загрузка страницы и так показывает бейдж (сброс в init)

@@ -184,7 +184,7 @@ async function refreshDiag() {
       out.push('Что сделать: 1) перезагрузите вкладку с видео; 2) подождите 5–10 с воспроизведения; 3) нажмите «Обновить» снова.');
     } else if (direct && direct.res) {
       out.push('ПРЯМАЯ СВЯЗЬ: ЕСТЬ (топ-фрейм отвечает).');
-      out.push('версия скрипта во вкладке: ' + (direct.res.version || '?') + ' (должна быть 0.1.61 — если меньше, вкладка не перезагружена после обновления)');
+      out.push('версия скрипта во вкладке: ' + (direct.res.version || '?') + ' (должна быть 0.1.62 — если меньше, вкладка не перезагружена после обновления)');
       out.push('разведка DOM: ' + JSON.stringify(direct.res.recon || {}));
       for (const v of (direct.res.videos || [])) {
         out.push(`video ${v.size}${v.vmVid ? ' ← ' + v.vmVid : ''} текУровень=${v.domCurRank} кликов=${v.domClicks} открывалка=${v.domOpenerAgoSec >= 0 ? v.domOpenerAgoSec + 'с назад' : '—'}`);
