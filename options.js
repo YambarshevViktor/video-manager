@@ -23,11 +23,11 @@ function subVals(s) {
     subSize: clampNum(s.subSize, 0, 250, SUB_DEFAULTS.subSize),
     subBgOpacity: clampNum(s.subBgOpacity, 0, 1, SUB_DEFAULTS.subBgOpacity),
     subBottomMargin: clampNum(s.subBottomMargin, 0, 200, SUB_DEFAULTS.subBottomMargin),
-    subShift: clampNum(s.subShift, -10, 10, SUB_DEFAULTS.subShift),
+    subShift: clampNum(s.subShift, -30, 30, SUB_DEFAULTS.subShift),
   };
 }
 function fmtShift(v) {
-  const n = clampNum(v, -10, 10, 0);
+  const n = clampNum(v, -30, 30, 0);
   return (n > 0 ? '+' : '') + (String(n).replace('.', ',')) + ' с';
 }
 
@@ -184,7 +184,7 @@ async function refreshDiag() {
       out.push('Что сделать: 1) перезагрузите вкладку с видео; 2) подождите 5–10 с воспроизведения; 3) нажмите «Обновить» снова.');
     } else if (direct && direct.res) {
       out.push('ПРЯМАЯ СВЯЗЬ: ЕСТЬ (топ-фрейм отвечает).');
-      out.push('версия скрипта во вкладке: ' + (direct.res.version || '?') + ' (должна быть 0.1.62 — если меньше, вкладка не перезагружена после обновления)');
+      out.push('версия скрипта во вкладке: ' + (direct.res.version || '?') + ' (должна быть 0.1.63 — если меньше, вкладка не перезагружена после обновления)');
       out.push('разведка DOM: ' + JSON.stringify(direct.res.recon || {}));
       for (const v of (direct.res.videos || [])) {
         out.push(`video ${v.size}${v.vmVid ? ' ← ' + v.vmVid : ''} текУровень=${v.domCurRank} кликов=${v.domClicks} открывалка=${v.domOpenerAgoSec >= 0 ? v.domOpenerAgoSec + 'с назад' : '—'}`);

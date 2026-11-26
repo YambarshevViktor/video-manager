@@ -199,7 +199,9 @@ icons/               Иконки (заглушки, заменяются пол
 ('allowlist'; legacy 'blacklist' игнорируется), sites['rezka.ag'] (зеркала HDRezka), perSite{host:bool}, badgePos{host:{left,top}},
 badgeHiddenTabs{tabId:true} (скрытие V, повкладочное, в экспорт не входит),
 speed(1), speedStep(0.5), preferredSpeed(2), speedHotkeys(true), subSize(35, %),
-subBgOpacity(0.7, 0–1), subBottomMargin(32, px), subShift(0, с; + — задерживает),
+subBgOpacity(0.7, 0–1), subBottomMargin(32, px), subShift(0, с; + — задерживает)
+(дефолты вида своих субтитров; правки ползунками в мини-панели — только на текущий
+файл, лежат в rec._subStyle, в storage НЕ пишутся; блок вида виден лишь при загруженном файле),
 updatesUrl('') (свой URL updates.json; пусто = DEFAULT_UPDATES_URL в content_isolated.js),
 vmUpdatesCache{at,records} (кэш истории заливок 24ч, внутр.), vmQsizes (вес, внутр.)`.
 Синхронизации между устройствами нет (осознанно, Dia without Google sync) — есть экспорт/импорт JSON.

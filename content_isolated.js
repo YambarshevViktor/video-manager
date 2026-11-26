@@ -7,7 +7,7 @@
 (() => {
   if (window.__VM_ISO_LOADED__) return;
   window.__VM_ISO_LOADED__ = true;
-  const VM_VERSION = '0.1.62'; // <-- сверяйте с manifest.json; если в диагностике версия меньше — вкладка не перезагружена
+  const VM_VERSION = '0.1.63'; // <-- сверяйте с manifest.json; если в диагностике версия меньше — вкладка не перезагружена
 
   // ---------- «Добавлено»: дата заливки серии/фильма (data/updates.json в репозитории)
   // Сборщик .github/workflows/updates-collect.yml раз в день парсит главную
@@ -215,7 +215,7 @@
       S.subSize = clampNum(S.subSize, 0, 250, 35);
       S.subBgOpacity = clampNum(S.subBgOpacity, 0, 1, 0.7);
       S.subBottomMargin = clampNum(S.subBottomMargin, 0, 200, 32);
-      S.subShift = clampNum(S.subShift, -10, 10, 0);
+      S.subShift = clampNum(S.subShift, -30, 30, 0);
     } catch (e) { S = { ...DEFAULTS }; }
   }
   function clampNum(v, min, max, fb) {
@@ -258,8 +258,12 @@
         // скорость могли поменять из попапа/настроек/другого фрейма —
         // доводим до видео принудительно (включая сброс в 1.0)
         if (chg.speed) { try { applySpeedAll(true); } catch (e) {} }
-        // настройки своих субтитров — перекрашиваем оверлеи на месте
+        // настройки своих субтитров из расширения — источник правды:
+        // сбрасывают сессионные правки панели и перекрашивают оверлеи
         if (chg.subSize || chg.subBgOpacity || chg.subBottomMargin || chg.subShift) {
+          try {
+            for (const rec of badges.values()) { try { rec._subStyle = null; } catch (e) {} }
+          } catch (e) {}
           try { refreshSubOverlays(); } catch (e) {}
         }
         refreshAllBadges();
@@ -1132,8 +1136,11 @@
       .dot{width:8px;height:8px;border-radius:50%;background:#3aa0ff;box-shadow:0 0 6px currentColor}
       .panel{position:absolute;left:50%;transform:translateX(-50%);top:calc(100% + 8px);width:230px;padding:12px;border-radius:18px;color:#f2f3f6;display:none;
         background:linear-gradient(160deg,rgba(38,40,54,.78),rgba(24,25,34,.72));border:1px solid rgba(255,255,255,.18);
-        -webkit-backdrop-filter:blur(20px) saturate(1.5);backdrop-filter:blur(20px) saturate(1.5);box-shadow:0 12px 40px rgba(0,0,0,.45)}
+        -webkit-backdrop-filter:blur(20px) saturate(1.5);backdrop-filter:blur(20px) saturate(1.5);box-shadow:0 12px 40px rgba(0,0,0,.45);
+        max-height:calc(100vh - 60px);overflow-y:auto;overscroll-behavior:contain}
       .panel.open{display:block}
+      .panel::-webkit-scrollbar{width:6px}
+      .panel::-webkit-scrollbar-thumb{background:rgba(255,255,255,.25);border-radius:3px}
       .pt{font-size:11px;opacity:.65;margin:14px 0 6px;text-transform:uppercase;letter-spacing:.08em}
       .panel>.pt:first-child{margin-top:2px}
       .row{display:flex;gap:6px;margin-bottom:8px}
@@ -1158,6 +1165,13 @@
       .substatus{margin-top:6px}
       .subrow{display:flex;gap:6px;margin-top:6px}
       .subrow .subbtn{flex:1}
+      .customsub{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+      .subset{margin-top:8px;padding:8px;border-radius:12px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);display:flex;flex-direction:column;gap:8px}
+      .subset .subhead{margin-top:0}
+      .srow{display:flex;flex-direction:column;gap:4px;font-size:11px}
+      .srow .sline{display:flex;justify-content:space-between;align-items:baseline;opacity:.9}
+      .srow .sval{opacity:.9;font-weight:600}
+      .srow input[type=range]{width:100%;accent-color:#8b5cf6;cursor:pointer}
       .hide{opacity:0;pointer-events:none}
     `;
     sh.appendChild(css);
@@ -2176,13 +2190,52 @@
   function refreshAllBadges() {
     for (const rec of badges.values()) {
       updateBadge(rec);
-      if (rec.open) renderPanel(rec);
+      // Слайдеры вида субтитров не пересоздаём посреди драга (панель тикает раз в 5с)
+      if (rec.open && !rec._subEditing) renderPanel(rec);
     }
     refreshVideoInfos();
+  }
+  // Панель всегда открывается вниз; не влезает — заканчиваем её за ~100px
+  // до нижнего края видимой области и включаем скролл.
+  // Учитываем ближайшего режущего предка (overflow у контейнера плеера):
+  // иначе панель обрежется контейнером, а её собственный скролл не включится.
+  function fitPanel(rec) {
+    try {
+      const p = rec.panel, host = rec.host;
+      if (!p || !host || !rec.open || !p.isConnected) return;
+      p.style.top = ''; p.style.bottom = ''; p.style.maxHeight = '';
+      let bottom = window.innerHeight || 900;
+      try {
+        let n = host.parentElement;
+        while (n && n !== document.documentElement) {
+          let ov = '';
+          try { ov = getComputedStyle(n).overflowY || ''; } catch (e) {}
+          if (/^(hidden|auto|scroll)$/.test(ov)) {
+            try {
+              const br = n.getBoundingClientRect();
+              bottom = Math.min(bottom, br.bottom);
+            } catch (e) {}
+            break;
+          }
+          n = n.parentElement;
+        }
+      } catch (e) {}
+      const hr = host.getBoundingClientRect();
+      const need = p.scrollHeight || p.offsetHeight || 0;
+      const below = bottom - hr.bottom - 12;
+      if (need > below) {
+        // низ панели останавливаем за ~100px до нижнего края, остальное — скролл
+        p.style.maxHeight = Math.max(140, Math.floor(below - 100)) + 'px';
+      }
+      // влезает целиком — ничего не капаем, CSS-страховка max-height остаётся
+    } catch (e) {}
   }
 
   function renderPanel(rec) {
     const p = rec.panel;
+    // перерисовка каждые 5с не должна сбрасывать скролл читающего список
+    let keepScroll = 0;
+    try { keepScroll = p.scrollTop || 0; } catch (e) {}
     const info = currentLabel(rec.video);
     const spd = desiredSpeed();
     const step = speedStep();
@@ -2209,6 +2262,14 @@
       <button class="fbtn fwide" data-act="customsubs">Свои субтитры (.srt)</button>
       <input type="file" accept=".srt" style="display:none">
       <div class="customsub" style="display:none"></div>
+      <div class="subset" style="display:none">
+        <div class="subhead">Свои субтитры · вид</div>
+        <label class="srow"><span class="sline"><span>Размер</span><b class="sval" data-val="subSize"></b></span><input type="range" data-sub="subSize" min="0" max="250" step="5"></label>
+        <label class="srow"><span class="sline"><span>Прозрачность фона</span><b class="sval" data-val="subBgOpacity"></b></span><input type="range" data-sub="subBgOpacity" min="0" max="1" step="0.05"></label>
+        <label class="srow"><span class="sline"><span>Отступ снизу</span><b class="sval" data-val="subBottomMargin"></b></span><input type="range" data-sub="subBottomMargin" min="0" max="200" step="1"></label>
+        <label class="srow"><span class="sline"><span>Сдвиг</span><b class="sval" data-val="subShift"></b></span><input type="range" data-sub="subShift" min="-30" max="30" step="0.5"></label>
+        <div class="subrow" style="margin-top:0"><button class="subbtn" data-act="subreset">Сбросить</button></div>
+      </div>
       <div class="subs" style="display:none"></div>
       <div class="substatus subnote" style="display:none"></div>`;
     p.querySelectorAll('[data-mode]').forEach((btn) => btn.addEventListener('click', async (e) => {
@@ -2243,12 +2304,14 @@
       if (box) box.style.display = rec._subsOpen ? 'flex' : 'none';
       if (stEl) stEl.style.display = 'none';
       if (rec._subsOpen) { try { rec._subsCache = null; } catch (e) {} renderSubsList(rec, true); }
+      try { fitPanel(rec); } catch (e) {}
     });
     if (rec._subsOpen) {
       const box = p.querySelector('.subs');
       if (box) { box.style.display = 'flex'; renderSubsList(rec); }
     }
     try { paintCustomSub(rec); } catch (e) {}
+    try { paintSubSettings(rec); } catch (e) {}
     const csBtn = p.querySelector('[data-act="customsubs"]');
     const csFile = p.querySelector('input[type="file"]');
     if (csBtn && csFile) csBtn.addEventListener('click', (e) => {
@@ -2261,6 +2324,8 @@
       if (f) loadCustomSrt(rec, f);
       try { csFile.value = ''; } catch (x) {}
     });
+    try { fitPanel(rec); } catch (e) {}
+    try { if (keepScroll) p.scrollTop = keepScroll; } catch (e) {}
   }
 
   function forceDomRank(video, rank) {
@@ -2330,6 +2395,11 @@
   function normSubLabel(s) {
     try { return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
     catch (e) { return ''; }
+  }
+  // «Откл.» — выключатель субтитров, а не дорожка: в список скачивания не берём
+  function isSubOffLabel(t) {
+    try { return /^(выкл|выключить|off|нет|disabled|откл|отключить)/i.test(String(t || '').trim()); }
+    catch (e) { return false; }
   }
   // Человеческое название дорожки («Русские»): имена файлов и заглушки отсеиваем
   function humanSubLabel(item) {
@@ -2476,9 +2546,9 @@
     try {
       const ov = rec._subOverlay, inner = rec._subOverlayInner;
       if (!ov || !inner || !ov.isConnected) return;
-      const size = clampNum(S.subSize, 0, 250, 35);
-      const op = clampNum(S.subBgOpacity, 0, 1, 0.7);
-      const bottom = clampNum(S.subBottomMargin, 0, 200, 32);
+      const size = subEff(rec, 'subSize');
+      const op = subEff(rec, 'subBgOpacity');
+      const bottom = subEff(rec, 'subBottomMargin');
       let base = 20;
       try {
         const h = (rec.video && rec.video.clientHeight) || 0;
@@ -2518,10 +2588,10 @@
       const v = rec.video;
       if (!v || !v.isConnected) { ov.style.display = 'none'; return; }
       if (cs.hidden) { ov.style.display = 'none'; return; }
-      if (clampNum(S.subSize, 0, 250, 35) <= 0) { ov.style.display = 'none'; return; }
+      if (subEff(rec, 'subSize') <= 0) { ov.style.display = 'none'; return; }
       let ct = 0;
       try { ct = v.currentTime || 0; } catch (e) {}
-      const shift = clampNum(S.subShift, -10, 10, 0);
+      const shift = subEff(rec, 'subShift');
       const act = [];
       for (const c of cs.cues) {
         if (ct >= c.start + shift && ct <= c.end + shift) act.push(c.text);
@@ -2558,7 +2628,10 @@
       rec._subOverlay = null;
       rec._subOverlayInner = null;
       rec._customSub = null;
+      rec._subStyle = null;
       try { paintCustomSub(rec); } catch (e) {}
+      try { paintSubSettings(rec); } catch (e) {}
+      try { fitPanel(rec); } catch (e) {}
       if (!silent) sayCustom(rec, 'Свои субтитры убраны');
     } catch (e) {}
   }
@@ -2593,6 +2666,105 @@
       box.appendChild(row);
     } catch (e) {}
   }
+  // ---------- настройки вида своих субтитров прямо в мини-панели ----------
+  // Слайдеры живут под кнопкой «Свои субтитры (.srt)» и видны только
+  // когда свои субтитры загружены. Настройка — на текущий файл:
+  // лежит в rec._subStyle, в storage НЕ пишется (иначе останется навсегда
+  // и не подойдёт следующему файлу). Новый файл стартует со значений
+  // из настроек расширения, «Сбросить» возвращает к ним же.
+  // Действующее значение: свой стиль файла, иначе глобальные настройки.
+  function subEff(rec, key) {
+    try {
+      if (rec && rec._customSub && rec._subStyle && rec._subStyle[key] !== undefined) {
+        const v = rec._subStyle[key];
+        if (key === 'subSize') return clampNum(v, 0, 250, 35);
+        if (key === 'subBgOpacity') return clampNum(v, 0, 1, 0.7);
+        if (key === 'subBottomMargin') return clampNum(v, 0, 200, 32);
+        return clampNum(v, -30, 30, 0);
+      }
+    } catch (e) {}
+    if (key === 'subSize') return clampNum(S.subSize, 0, 250, 35);
+    if (key === 'subBgOpacity') return clampNum(S.subBgOpacity, 0, 1, 0.7);
+    if (key === 'subBottomMargin') return clampNum(S.subBottomMargin, 0, 200, 32);
+    return clampNum(S.subShift, -30, 30, 0);
+  }
+  function baseSubStyle() {
+    return {
+      subSize: clampNum(S.subSize, 0, 250, 35),
+      subBgOpacity: clampNum(S.subBgOpacity, 0, 1, 0.7),
+      subBottomMargin: clampNum(S.subBottomMargin, 0, 200, 32),
+      subShift: clampNum(S.subShift, -30, 30, 0),
+    };
+  }
+  function fmtSubShiftPanel(v) {
+    const n = clampNum(v, -30, 30, 0);
+    return (n > 0 ? '+' : '') + String(n).replace('.', ',') + ' с';
+  }
+  function fmtSubValPanel(key, v) {
+    if (key === 'subSize') return clampNum(v, 0, 250, 35) + '%';
+    if (key === 'subBgOpacity') return String(clampNum(v, 0, 1, 0.7)).replace('.', ',');
+    if (key === 'subBottomMargin') return clampNum(v, 0, 200, 32) + ' px';
+    if (key === 'subShift') return fmtSubShiftPanel(v);
+    return String(v);
+  }
+  function clampSubVal(key, v) {
+    if (key === 'subSize') return clampNum(v, 0, 250, 35);
+    if (key === 'subBgOpacity') return clampNum(v, 0, 1, 0.7);
+    if (key === 'subBottomMargin') return clampNum(v, 0, 200, 32);
+    return clampNum(v, -30, 30, 0);
+  }
+  function paintSubSettings(rec) {
+    try {
+      const p = rec.panel;
+      if (!p) return;
+      const wrap = p.querySelector('.subset');
+      if (wrap) wrap.style.display = rec._customSub ? 'flex' : 'none';
+      if (!rec._customSub) return;
+      const sliders = p.querySelectorAll('input[data-sub]');
+      if (!sliders.length) return;
+      sliders.forEach((el) => {
+        const key = el.dataset.sub;
+        const cur = subEff(rec, key);
+        try { el.value = cur; } catch (e) {}
+        const lab = p.querySelector('[data-val="' + key + '"]');
+        if (lab) lab.textContent = fmtSubValPanel(key, cur);
+        if (el._vmSubBound) return;
+        el._vmSubBound = true;
+        el.addEventListener('pointerdown', (e) => { try { e.stopPropagation(); } catch (x) {} try { rec._subEditing = true; } catch (x) {} });
+        el.addEventListener('focus', () => { try { rec._subEditing = true; } catch (x) {} });
+        el.addEventListener('blur', () => { try { rec._subEditing = false; } catch (x) {} });
+        el.addEventListener('pointerup', () => { try { rec._subEditing = false; } catch (x) {} });
+        el.addEventListener('pointercancel', () => { try { rec._subEditing = false; } catch (x) {} });
+        el.addEventListener('click', (e) => { try { e.stopPropagation(); } catch (x) {} });
+        el.addEventListener('input', (e) => {
+          try { e.stopPropagation(); } catch (x) {}
+          const k = el.dataset.sub;
+          const v = clampSubVal(k, parseFloat(String(el.value).replace(',', '.')));
+          try { if (!rec._subStyle) rec._subStyle = baseSubStyle(); } catch (x) {}
+          try { rec._subStyle[k] = v; } catch (x) {}
+          const l2 = p.querySelector('[data-val="' + k + '"]');
+          if (l2) l2.textContent = fmtSubValPanel(k, v);
+          try { applySubOverlayStyle(rec); } catch (x) {}
+          try { tickCustomSub(rec); } catch (x) {}
+        });
+        el.addEventListener('change', (e) => {
+          try { e.stopPropagation(); } catch (x) {}
+          try { rec._subEditing = false; } catch (x) {}
+        });
+      });
+      const rs = p.querySelector('[data-act="subreset"]');
+      if (rs && !rs._vmSubBound) {
+        rs._vmSubBound = true;
+        rs.addEventListener('click', (e) => {
+          e.stopPropagation();
+          try { rec._subStyle = baseSubStyle(); } catch (x) {}
+          try { applySubOverlayStyle(rec); } catch (x) {}
+          try { tickCustomSub(rec); } catch (x) {}
+          try { paintSubSettings(rec); } catch (x) {}
+        });
+      }
+    } catch (e) {}
+  }
   async function loadCustomSrt(rec, file) {
     try {
       const fname = (file && file.name) || 'свои.srt';
@@ -2616,11 +2788,15 @@
       } catch (e) {}
       let short = String(fname).replace(/\.srt$/i, '').slice(0, 40) || 'Свои';
       rec._customSub = { name: short, cues, hidden: false };
+      // новый файл — чистые значения из настроек расширения, не хвост прошлого
+      try { rec._subStyle = baseSubStyle(); } catch (e) {}
       try { ensureSubOverlay(rec); } catch (e) {}
       try { applySubOverlayStyle(rec); } catch (e) {}
       try { tickCustomSub(rec); } catch (e) {}
       try { paintCustomSub(rec); } catch (e) {}
-      sayCustom(rec, '«' + short + '» поверх видео (' + cues.length + ' фраз). Вид — в настройках расширения.');
+      try { paintSubSettings(rec); } catch (e) {}
+      try { fitPanel(rec); } catch (e) {}
+      sayCustom(rec, '«' + short + '» поверх видео (' + cues.length + ' фраз). Вид настройте ниже.');
     } catch (e) { try { sayCustom(rec, 'Не получилось подключить'); } catch (x) {} }
   }
   function collectSubtitles(video) {
@@ -2729,7 +2905,7 @@
           const t = (((el.innerText || el.textContent) || '').trim().replace(/\s+/g, ' '));
           if (!/субтитр/i.test(t)) continue;
           const m = t.replace(/субтитры?/i, '').replace(/^[\s:—–-]+/, '').trim();
-          if (m && !/^(выкл|off|нет)/i.test(m)) { out._menuActive = m; break; }
+          if (m && !isSubOffLabel(m)) { out._menuActive = m; break; }
         }
       } catch (e) {}
       // 6б) пункты-кандидаты: со словами, но не качество и не скорость
@@ -2771,7 +2947,7 @@
           } catch (e) {}
           if (!t || t.length > 40) continue;
           if (!/[а-яА-ЯёЁa-zA-Z]/.test(t)) continue; // «1.5» скорости не берём
-          if (/^(выкл|off|нет|disabled|откл)/i.test(t)) continue; // «без субтитров»
+          if (isSubOffLabel(t)) continue; // «без субтитров»
           if (/^(обычная|normal|standard)$/i.test(t)) continue; // значение скорости, не дорожка
           if (/качеств|скорост|субтитр|звук|аудио|audio|quality|speed|масштаб|airplay|параметр/i.test(t)) continue;
           if (extractQToken(t)) continue; // пункты качества
@@ -2851,7 +3027,7 @@
         } catch (e) {}
         if (!t || t.length > 40) return '';
         if (!/[а-яА-ЯёЁa-zA-Z]/.test(t)) return '';
-        if (/^(выкл|off|нет|disabled|откл)/i.test(t)) return '';
+        if (isSubOffLabel(t)) return '';
         if (/качеств|скорост|субтитр|звук|аудио|audio|quality|speed|масштаб|airplay|параметр/i.test(t)) return '';
         try { if (extractQToken(t)) return ''; } catch (e) {}
         return t;
@@ -3056,7 +3232,7 @@
         if (!/субтитр/i.test(t)) continue;
         seen = true;
         const m = t.replace(/субтитры?/i, '').replace(/^[\s:—–-]+/, '').trim();
-        if (m && !/^(выкл|off|нет)/i.test(m)) { val = m; break; }
+        if (m && !isSubOffLabel(m)) { val = m; break; }
       }
     } catch (e) {}
     return { seen, val };
@@ -3223,6 +3399,7 @@
       // кэш на 30с — панель перерисовывается каждые 5с, не дёргаем сеть каждый раз
       if (rec._subsCache && now - rec._subsCache.t < 30000 && rec._subsCache.items) {
         paintSubsList(rec, box, rec._subsCache.items);
+        try { fitPanel(rec); } catch (e) {}
       } else {
         box.innerHTML = '<div class="subnote">Ищу субтитры…</div>';
       }
@@ -3340,7 +3517,11 @@
             } else if (uniq.length === 1 && newest.item) {
               try {
                 const lb = String(newest.item.label || '');
-                if (/\.(vtt|srt|ttml|ass|ssa|smi|sbv)(\?|#|$)/i.test(lb) || /^[a-z0-9]{8,}$/i.test(lb.replace(/\.\w+$/, '')) || /^(файл|субтитры)\s*\d*$/i.test(lb)) newest.item.label = 'Субтитры';
+                if (/\.(vtt|srt|ttml|ass|ssa|smi|sbv)(\?|#|$)/i.test(lb) || /^[a-z0-9]{8,}$/i.test(lb.replace(/\.\w+$/, '')) || /^(файл|субтитры)\s*\d*$/i.test(lb)) {
+                  // безымянный файл: показываем его настоящее имя, а не заголовок «Субтитры»
+                  const fn = newest.fileName || newest.item.netFile || '';
+                  if (fn) newest.item.label = fn;
+                }
               } catch (e) {}
             }
             for (const cp of uniq) {
@@ -3350,6 +3531,13 @@
           }
         } catch (e) {}
       } catch (e) {}
+      // страховка: «Откл.» никогда не становится кнопкой скачивания
+      try {
+        for (let i = items.length - 1; i >= 0; i--) {
+          const it = items[i];
+          if (isSubOffLabel(it.label) || isSubOffLabel(it.lang)) items.splice(i, 1);
+        }
+      } catch (e) {}
       items.forEach((it, i) => { it._idx = i; it._ready = !!(it.netUrl || (it.cues && it.cues > 0)); });
       // готовые первыми, остальные по названию
       try { items.sort((a, b) => (((b._ready ? 1 : 0) - (a._ready ? 1 : 0)) || String(a.label || '').localeCompare(String(b.label || ''), 'ru'))); } catch (e) {}
@@ -3358,6 +3546,7 @@
       const box2 = rec.panel.querySelector('.subs');
       if (!box2 || !box2.isConnected || box2 !== box) return; // панель уже перерисована — новый проход сам всё покажет
       paintSubsList(rec, box2, items);
+      try { fitPanel(rec); } catch (e) {}
     } catch (e) {}
   }
 
